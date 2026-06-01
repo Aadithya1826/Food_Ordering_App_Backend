@@ -43,7 +43,7 @@ def get_live_orders(
 
         response.append({
             "order_id": o.id,
-            "table_number": o.table.table_number if o.table else "N/A",
+            "table_number": o.table.table_number if o.table else "TakeAway",
             "status": o.status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
@@ -111,7 +111,7 @@ def get_all_orders(
 
         response.append({
             "order_id": o.id,
-            "table_number": o.table.table_number if o.table else "N/A",
+            "table_number": o.table.table_number if o.table else "TakeAway",
             "status": o.status,
             "payment_method": method,
             "payment_status": p_status,
