@@ -48,6 +48,7 @@ def get_tables(
             "table_number": t.table_number,
             "qr_code": t.qr_code,
             "capacity": getattr(t, "capacity", 4),
+            "status": getattr(t, "status", "Vacant"),
             "is_active": getattr(t, "is_active", True),
             "current_order_id": active_order_id,
             "created_at": t.created_at,

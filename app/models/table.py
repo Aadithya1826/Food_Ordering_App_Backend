@@ -11,6 +11,7 @@ class Table(Base):
     table_number = Column(String, unique=True, index=True)
     qr_code = Column(Text, nullable=True)
     capacity = Column(Integer, default=4)
+    status = Column(String, default="Vacant")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     

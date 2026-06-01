@@ -64,8 +64,16 @@ def update_inventory(
 
     require_restaurant_access(user, item.restaurant_id)
  
-    if "quantity" in data:
-        item.quantity = data["quantity"]
+    if "open_stock" in data:
+        item.open_stock = data["open_stock"]
+    if "purchase" in data:
+        item.purchase = data["purchase"]
+    if "total" in data:
+        item.total = data["total"]
+    if "issue" in data:
+        item.issue = data["issue"]
+    if "balance" in data:
+        item.balance = data["balance"]
     if "name" in data:
         item.name = data["name"]
     if "unit" in data:
@@ -114,14 +122,18 @@ def create_inventory(
 
     restaurant_id = resolve_restaurant_id(user, data.get("restaurant_id"))
 
-    if not data.get("name") or data.get("quantity") is None or not data.get("unit"):
-        raise HTTPException(status_code=400, detail="Name, quantity, and unit are required")
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Name is required")
 
     new_item = InventoryItem(
         restaurant_id=restaurant_id,
         name=data["name"],
-        quantity=data["quantity"],
-        unit=data["unit"]
+        open_stock=data.get("open_stock", 0.0),
+        purchase=data.get("purchase", 0.0),
+        total=data.get("total", 0.0),
+        issue=data.get("issue", 0.0),
+        balance=data.get("balance", 0.0),
+        unit=data.get("unit", "units")
     )
 
     db.add(new_item)
@@ -183,10 +195,14 @@ def bulk_update_inventory(
     
     for item_data in items:
         name = item_data.get("name")
-        quantity = item_data.get("quantity")
+        open_stock = item_data.get("open_stock", 0.0)
+        purchase = item_data.get("purchase", 0.0)
+        total = item_data.get("total", 0.0)
+        issue = item_data.get("issue", 0.0)
+        balance = item_data.get("balance", 0.0)
         unit = item_data.get("unit")
         
-        if not name or quantity is None:
+        if not name:
             continue
             
         # Check if item exists
@@ -196,7 +212,11 @@ def bulk_update_inventory(
         ).first()
         
         if existing_item:
-            existing_item.quantity = quantity
+            existing_item.open_stock = open_stock
+            existing_item.purchase = purchase
+            existing_item.total = total
+            existing_item.issue = issue
+            existing_item.balance = balance
             if unit:
                 existing_item.unit = unit
             updated_count += 1
@@ -204,7 +224,11 @@ def bulk_update_inventory(
             new_item = InventoryItem(
                 restaurant_id=restaurant_id,
                 name=name,
-                quantity=quantity,
+                open_stock=open_stock,
+                purchase=purchase,
+                total=total,
+                issue=issue,
+                balance=balance,
                 unit=unit or "units"
             )
             db.add(new_item)

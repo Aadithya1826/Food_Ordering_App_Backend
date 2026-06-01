@@ -5,6 +5,8 @@ from ..models.user import User
 from ..models.restaurant import Restaurant
 from ..utils.auth import verify_password, create_token, hash_password
 from ..schemas import LoginRequest, LoginResponse, UserResponse, SignupRequest
+from ..utils.dependencies import get_current_user
+from ..utils.roles import require_role
 
 router = APIRouter()
 
@@ -168,3 +170,51 @@ def get_managers(db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error fetching managers: {str(e)}")
         raise HTTPException(status_code=500, detail="Unable to fetch managers. Please try again.")
+
+
+@router.patch("/api/v1/managers/{manager_id}")
+def update_manager(manager_id: int, data: dict, user = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Update manager details (name, email, restaurant_id, is_active)
+    """
+    require_role(user, ["SUPER_ADMIN"])
+
+    manager = db.query(User).filter(User.id == manager_id, User.role == "HOTEL_ADMIN").first()
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+
+    if "name" in data:
+        manager.name = data["name"]
+    if "email" in data:
+        # Check if email is being changed and if it already exists
+        if data["email"] != manager.email:
+            existing = db.query(User).filter(User.email == data["email"]).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Email already registered")
+        manager.email = data["email"]
+    if "restaurant_id" in data:
+        manager.restaurant_id = data["restaurant_id"]
+    if "is_active" in data:
+        manager.is_active = data["is_active"]
+
+    db.commit()
+    db.refresh(manager)
+
+    return {"status": "success", "message": "Manager updated successfully"}
+
+
+@router.delete("/api/v1/managers/{manager_id}")
+def delete_manager(manager_id: int, user = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Delete a manager
+    """
+    require_role(user, ["SUPER_ADMIN"])
+
+    manager = db.query(User).filter(User.id == manager_id, User.role == "HOTEL_ADMIN").first()
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+
+    db.delete(manager)
+    db.commit()
+
+    return {"status": "success", "message": "Manager deleted successfully"}

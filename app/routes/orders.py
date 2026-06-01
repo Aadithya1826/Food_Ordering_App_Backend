@@ -43,7 +43,7 @@ def get_live_orders(
 
         response.append({
             "order_id": o.id,
-            "table_number": o.table.table_number,
+            "table_number": o.table.table_number if o.table else "N/A",
             "status": o.status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
