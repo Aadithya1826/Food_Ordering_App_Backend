@@ -15,6 +15,29 @@ def get_db():
     finally:
         db.close()
 
+# Public GET categories
+@router.get("/api/v1/public/menu/categories", response_model=list[MenuCategoryResponse])
+def public_get_categories(
+    restaurant_id: int | None = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuCategory)
+    if restaurant_id is not None:
+        query = query.filter(MenuCategory.restaurant_id == restaurant_id)
+    return query.all()
+
+# Public GET items
+@router.get("/api/v1/public/menu/items", response_model=list[MenuItemResponse])
+def public_get_items(
+    restaurant_id: int | None = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuItem)
+    if restaurant_id is not None:
+        query = query.filter(MenuItem.restaurant_id == restaurant_id)
+    return query.all()
+
+
 # GET categories
 @router.get("/api/v1/menu/categories", response_model=list[MenuCategoryResponse])
 def get_categories(

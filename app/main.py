@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, chat
 from .mcp import router as mcp_router
 import os
 
@@ -33,4 +33,5 @@ app.include_router(table.router)
 app.include_router(inventory.router)
 app.include_router(restaurants.router)
 app.include_router(reports.router)
+app.include_router(chat.router)
 app.include_router(mcp_router)
