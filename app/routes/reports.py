@@ -142,8 +142,9 @@ def get_reports(
             })
 
     # Order Breakdown
-    dine_in_count = base_q.filter(Order.table_id.isnot(None)).count()
-    takeaway_total = base_q.filter(Order.table_id.is_(None)).count()
+    dine_in_count = base_q.filter(Order.table_id.isnot(None), Order.table_id != 'takeaway').count()
+    from sqlalchemy import or_
+    takeaway_total = base_q.filter(or_(Order.table_id.is_(None), Order.table_id == 'takeaway')).count()
     
     delivery_count = int(takeaway_total * 0.5)
     takeaway_count = takeaway_total - delivery_count

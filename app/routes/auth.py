@@ -171,6 +171,41 @@ def get_managers(db: Session = Depends(get_db)):
         print(f"Error fetching managers: {str(e)}")
         raise HTTPException(status_code=500, detail="Unable to fetch managers. Please try again.")
 
+@router.post("/api/v1/managers")
+def create_manager(data: SignupRequest, user = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Create a new manager (HOTEL_ADMIN user)
+    """
+    require_role(user, ["SUPER_ADMIN"])
+
+    existing_user = db.query(User).filter(User.email == data.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    if data.restaurant_id is None:
+        raise HTTPException(status_code=400, detail="Restaurant selection is required for hotel managers")
+        
+    restaurant = db.query(Restaurant).filter(Restaurant.id == data.restaurant_id).first()
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Selected restaurant not found")
+
+    hashed_password = hash_password(data.password)
+
+    new_manager = User(
+        name=data.name,
+        email=data.email,
+        password_hash=hashed_password,
+        role="HOTEL_ADMIN",
+        restaurant_id=data.restaurant_id
+    )
+
+    db.add(new_manager)
+    db.commit()
+    db.refresh(new_manager)
+
+    return {"status": "success", "message": "Manager created successfully", "manager_id": new_manager.id}
+
+
 
 @router.patch("/api/v1/managers/{manager_id}")
 def update_manager(manager_id: int, data: dict, user = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -196,6 +231,8 @@ def update_manager(manager_id: int, data: dict, user = Depends(get_current_user)
         manager.restaurant_id = data["restaurant_id"]
     if "is_active" in data:
         manager.is_active = data["is_active"]
+    if "password" in data and data["password"]:
+        manager.password_hash = hash_password(data["password"])
 
     db.commit()
     db.refresh(manager)

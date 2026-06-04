@@ -21,6 +21,9 @@ class OrderCreate(BaseModel):
 class OrderStatusUpdate(BaseModel):
     status: str
 
+class OrderPaymentStatusUpdate(BaseModel):
+    payment_status: str
+
 class OrderResponse(BaseModel):
     id: int
     table_id: int

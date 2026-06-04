@@ -26,21 +26,30 @@ def get_tables(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
-    query = db.query(Table).options(joinedload(Table.orders))
+    query = db.query(Table)
     if restaurant_id is not None:
         query = query.filter(Table.restaurant_id == restaurant_id)
 
     tables = query.order_by(Table.id).all()
     
+    # Find all active orders for the relevant restaurant
+    from ..models.order import Order
+    active_orders_query = db.query(Order).filter(
+        Order.status.notin_(("SERVED", "COMPLETED", "CANCELLED"))
+    )
+    if restaurant_id is not None:
+        active_orders_query = active_orders_query.filter(Order.restaurant_id == restaurant_id)
+        
+    active_orders = active_orders_query.all()
+    active_order_map = {}
+    for o in active_orders:
+        if o.table_id and str(o.table_id).isdigit():
+            active_order_map[int(o.table_id)] = o.id
+
     result = []
     for t in tables:
         # Find active order
-        active_order_id = None
-        if t.is_active:
-            for o in t.orders:
-                if o.status not in ("SERVED", "COMPLETED", "CANCELLED"):
-                    active_order_id = o.id
-                    break
+        active_order_id = active_order_map.get(t.id) if t.is_active else None
         
         result.append({
             "id": t.id,
