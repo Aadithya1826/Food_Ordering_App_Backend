@@ -1,9 +1,0 @@
-{
-  "name": "restaurant-backend",
-  "version": "1.0.0",
-  "description": "Python backend configured for npm commands",
-  "scripts": {
-    "start": "python -m uvicorn app.main:app --reload",
-    "dev": "python -m uvicorn app.main:app --reload"
-  }
-}

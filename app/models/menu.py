@@ -7,7 +7,7 @@ class MenuCategory(Base):
     __tablename__ = "menu_categories"
 
     id = Column(Integer, primary_key=True, index=True)
-    restaurant_id = Column(Integer, nullable=True)
+    restaurant_id = Column(Integer, index=True, nullable=True)
     name = Column(String, unique=True, index=True)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -18,8 +18,8 @@ class MenuItem(Base):
     __tablename__ = "menu_items"
 
     id = Column(Integer, primary_key=True, index=True)
-    restaurant_id = Column(Integer, nullable=True)
-    category_id = Column(Integer, ForeignKey("menu_categories.id"))
+    restaurant_id = Column(Integer, index=True, nullable=True)
+    category_id = Column(Integer, ForeignKey("menu_categories.id"), index=True)
     name = Column(String, index=True)
     description = Column(Text, nullable=True)
     price = Column(Float)

@@ -6,7 +6,7 @@ class InventoryItem(Base):
     __tablename__ = "inventory_items"
 
     id = Column(Integer, primary_key=True)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"))
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id"), index=True)
     name = Column(String)
     open_stock = Column(Float, default=0.0)
     purchase = Column(Float, default=0.0)

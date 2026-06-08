@@ -12,10 +12,10 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    restaurant_id = Column(Integer, nullable=True)
+    restaurant_id = Column(Integer, index=True, nullable=True)
     name = Column(String)
     email = Column(String, unique=True, index=True)
     password_hash = Column(String)
-    role = Column(String, nullable=True)
+    role = Column(String, index=True, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

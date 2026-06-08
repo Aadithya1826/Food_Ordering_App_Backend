@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..schemas.order import OrderStatusUpdate, OrderPaymentStatusUpdate
@@ -25,7 +25,9 @@ def get_live_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
-    query = db.query(Order).filter(Order.status != "SERVED")
+    query = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(Order.status != "SERVED")
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 
@@ -116,7 +118,9 @@ def get_all_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
-    query = db.query(Order)
+    query = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    )
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 

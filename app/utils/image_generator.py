@@ -62,10 +62,9 @@ def generate_menu_item_image(item_id: int, item_name: str, item_description: str
         for attempt in range(max_retries):
             try:
                 print(f"Using dynamic fallback image generation for {item_name} (Attempt {attempt+1})...")
-                prompt_text = f"Professional food photography of {item_name}, appetizing, beautiful plating, high quality"
-                encoded_prompt = urllib.parse.quote(prompt_text)
-                seed = random.randint(1, 1000000)
-                url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=600&height=600&nologo=true&seed={seed}"
+                # Dynamic image APIs are unreliable or paid, using Dicebear Initials as a clean, reliable fallback
+                encoded_name = urllib.parse.quote(item_name)
+                url = f"https://api.dicebear.com/7.x/initials/png?seed={encoded_name}&backgroundColor=000000,e2e8f0,bbf7d0,fef08a,fbcfe8,bfdbfe&chars=2&size=600"
                 
                 response = requests.get(url, timeout=30)
                 if response.status_code == 200:

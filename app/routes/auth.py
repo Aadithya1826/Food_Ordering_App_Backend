@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.user import User
@@ -255,3 +255,61 @@ def delete_manager(manager_id: int, user = Depends(get_current_user), db: Sessio
     db.commit()
 
     return {"status": "success", "message": "Manager deleted successfully"}
+
+
+@router.post("/api/v1/auth/refresh")
+def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+    """
+    Silently refresh the access token if it exists in the cookies or header.
+    Even if expired, we decode it and issue a new one if the user is still valid.
+    """
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            
+    if not token:
+        raise HTTPException(status_code=401, detail="No token provided")
+
+    try:
+        from jose import jwt
+        from ..utils.auth import SECRET_KEY, ALGORITHM, create_token
+        
+        # Decode ignoring expiry
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+        user_id = payload.get("user_id")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+            
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+            
+        # Create new token
+        new_token = create_token(user)
+        
+        # Set new cookie
+        response.set_cookie(
+            key="access_token",
+            value=new_token,
+            httponly=True,
+            max_age=1800,  # 30 minutes
+            expires=1800,
+            secure=False,
+            samesite="lax"
+        )
+        
+        return {
+            "access_token": new_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "role": user.role,
+                "restaurant_id": user.restaurant_id
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Could not refresh token")
