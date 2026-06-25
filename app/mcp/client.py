@@ -21,18 +21,31 @@ class GeminiClient:
         self.model = GEMINI_MODEL
         self.api_key = GEMINI_API_KEY
 
-    async def generate_text(self, prompt: str, max_tokens: int = 600, temperature: float = 0.2) -> str:
+    async def generate_text(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, audio_base64: str = None, response_mime_type: str = None) -> str:
         # The correct endpoint for gemini-1.5-pro is generateContent, not generateText
         # We'll adapt the base URL to use v1beta and the correct model format
         base_url = self.base_url.replace("v1beta2", "v1beta")
         url = f"{base_url}/models/{self.model}:generateContent?key={self.api_key}"
+        
+        parts = [{"text": prompt}]
+        if audio_base64:
+            parts.append({
+                "inlineData": {
+                    "mimeType": "audio/webm",
+                    "data": audio_base64
+                }
+            })
+            
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [{"parts": parts}],
             "generationConfig": {
                 "temperature": temperature,
                 "maxOutputTokens": max_tokens,
             }
         }
+        
+        if response_mime_type:
+            payload["generationConfig"]["responseMimeType"] = response_mime_type
 
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(url, json=payload)
@@ -41,11 +54,11 @@ class GeminiClient:
 
         return self._extract_text(body)
 
-    async def generate_json(self, prompt: str, max_tokens: int = 600, temperature: float = 0.2) -> dict:
-        raw_text = await self.generate_text(prompt, max_tokens=max_tokens, temperature=temperature)
+    async def generate_json(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, audio_base64: str = None) -> dict:
+        raw_text = await self.generate_text(prompt, max_tokens=max_tokens, temperature=temperature, audio_base64=audio_base64, response_mime_type="application/json")
         parsed = self._try_parse_json(raw_text)
         if parsed is None:
-            raise ValueError("Gemini response could not be parsed as JSON")
+            raise ValueError(f"Gemini response could not be parsed as JSON. Raw text: {raw_text}")
         return parsed
 
     async def generate_speech(self, text: str, audio_encoding: str = "MP3") -> dict:
@@ -84,6 +97,17 @@ class GeminiClient:
 
     def _try_parse_json(self, raw_text: str) -> dict | None:
         trimmed = raw_text.strip()
+        
+        # Remove markdown JSON fences if they exist
+        if trimmed.startswith("```json"):
+            trimmed = trimmed[7:]
+        elif trimmed.startswith("```"):
+            trimmed = trimmed[3:]
+            
+        if trimmed.endswith("```"):
+            trimmed = trimmed[:-3]
+            
+        trimmed = trimmed.strip()
 
         json_text = self._extract_first_json_object(trimmed)
         if not json_text:
