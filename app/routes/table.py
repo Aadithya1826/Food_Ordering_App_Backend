@@ -49,15 +49,15 @@ def get_tables(
     result = []
     for t in tables:
         # Find active order
-        active_order_id = active_order_map.get(t.id) if t.is_active else None
+        active_order_id = active_order_map.get(t.id) if getattr(t, "is_active", True) else None
         
         result.append({
             "id": t.id,
             "restaurant_id": t.restaurant_id,
             "table_number": t.table_number,
             "qr_code": t.qr_code,
-            "capacity": getattr(t, "capacity", 4),
-            "status": getattr(t, "status", "Vacant"),
+            "capacity": getattr(t, "capacity", 4) or 4,
+            "status": getattr(t, "status", "Vacant") or "Vacant",
             "is_active": getattr(t, "is_active", True),
             "current_order_id": active_order_id,
             "created_at": t.created_at,
