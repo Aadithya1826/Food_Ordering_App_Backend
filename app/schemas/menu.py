@@ -13,6 +13,7 @@ class MenuCategoryResponse(MenuCategoryCreate):
         from_attributes = True
 
 class MenuItemCreate(BaseModel):
+    item_code: Optional[str] = None
     name: str
     description: Optional[str] = None
     price: float
@@ -29,6 +30,7 @@ class MenuItemResponse(MenuItemCreate):
         from_attributes = True
 
 class MenuItemUpdate(BaseModel):
+    item_code: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     price: Optional[float] = None

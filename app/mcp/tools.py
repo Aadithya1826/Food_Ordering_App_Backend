@@ -23,6 +23,7 @@ def list_menu_items(db: Session, user, restaurant_id: int | None = None) -> list
     return [
         {
             "id": item.id,
+            "item_code": item.item_code,
             "name": item.name,
             "description": item.description,
             "price": item.price,
@@ -43,6 +44,7 @@ def search_menu_item(db: Session, user, name: str, restaurant_id: int | None = N
     return [
         {
             "id": item.id,
+            "item_code": item.item_code,
             "name": item.name,
             "description": item.description,
             "price": item.price,
@@ -200,7 +202,7 @@ def update_order_status(db: Session, user, order_id: int, status: str) -> dict:
     }
 
 
-def update_menu_item(db: Session, user, item_name: str, price: float = None, is_available: bool = None) -> dict:
+def update_menu_item(db: Session, user, item_name: str, price: float = None, is_available: bool = None, item_code: str = None) -> dict:
     query = db.query(MenuItem).filter(MenuItem.name.ilike(f"%{item_name}%"))
     query = filter_by_user_restaurant(user, query)
     item = query.first()
@@ -214,11 +216,14 @@ def update_menu_item(db: Session, user, item_name: str, price: float = None, is_
         item.price = price
     if is_available is not None:
         item.is_available = is_available
+    if item_code is not None:
+        item.item_code = item_code
         
     db.commit()
     db.refresh(item)
     return {
         "id": item.id,
+        "item_code": item.item_code,
         "name": item.name,
         "price": item.price,
         "is_available": item.is_available
@@ -369,11 +374,12 @@ TOOL_REGISTRY = {
         "handler": update_order_status,
     },
     "update_menu_item": {
-        "description": "Update the price or availability of a menu item.",
+        "description": "Update the price, availability, or item ID (item_code) of a menu item.",
         "parameters": {
             "item_name": "Name or partial name of the menu item (e.g. 'sambar rice').",
             "price": "Optional. New price.",
-            "is_available": "Optional. True if available, false if not."
+            "is_available": "Optional. True if available, false if not.",
+            "item_code": "Optional. New item ID / code (e.g. 'ITM-001')."
         },
         "handler": update_menu_item,
     },

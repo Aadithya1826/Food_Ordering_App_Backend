@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
+import os
+import uuid
+import shutil
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.menu import MenuItem, MenuCategory
@@ -193,3 +196,27 @@ def delete_item(
     db.delete(item)
     db.commit()
     return None
+
+@router.post("/api/v1/menu/upload-image")
+def upload_menu_image(
+    file: UploadFile = File(...),
+    user = Depends(get_current_user)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+        
+    ext = file.filename.split(".")[-1]
+    filename = f"{uuid.uuid4()}.{ext}"
+    
+    # backend/app/routes/menu.py -> backend/static/images
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    file_path = os.path.join(backend_dir, "static", "images", filename)
+    
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    return {"image_url": f"/static/images/{filename}"}
