@@ -51,13 +51,27 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
         
         manager_name = manager.name if manager else None
         
+        from sqlalchemy import func
+        stats = db.query(
+            func.count(Order.id).label("total_orders"),
+            func.sum(Order.total_amount).label("total_revenue")
+        ).filter(
+            Order.restaurant_id == restaurant.id,
+        ).first()
+
+        orders_count = stats.total_orders or 0
+        total_revenue = stats.total_revenue or 0.0
+
         result.append(RestaurantResponse(
             id=restaurant.id,
             name=restaurant.name,
             address=restaurant.address,
             phone=restaurant.phone,
             created_at=restaurant.created_at,
-            manager_name=manager_name
+            manager_name=manager_name,
+            orders=orders_count,
+            revenue=total_revenue,
+            venues=1
         ))
     
     return result

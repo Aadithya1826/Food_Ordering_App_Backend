@@ -43,6 +43,9 @@ class RestaurantResponse(BaseModel):
     packaging_charge: Optional[float] = None
     created_at: datetime
     manager_name: Optional[str] = None
+    orders: Optional[int] = 0
+    revenue: Optional[float] = 0.0
+    venues: Optional[int] = 1
 
     class Config:
         from_attributes = True

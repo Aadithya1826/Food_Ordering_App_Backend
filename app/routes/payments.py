@@ -7,8 +7,8 @@ from typing import Optional
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
 # Get credentials from environment
-RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_live_T4wysiHzIDwFA1")
-RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "5PxNK7RZ52tJNy6tvy9e3XH8")
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 # Initialize client only if we have the secret
 client = None

@@ -20,6 +20,7 @@ class MenuItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     restaurant_id = Column(Integer, index=True, nullable=True)
     category_id = Column(Integer, ForeignKey("menu_categories.id"), index=True)
+    item_code = Column(String, index=True, nullable=True)
     name = Column(String, index=True)
     description = Column(Text, nullable=True)
     price = Column(Float)

@@ -144,7 +144,7 @@ def get_live_orders(
     for o in orders:
         items = [
             {
-                "name": i.menu_item.name,
+                "name": i.menu_item.name if i.menu_item else "Unknown Item",
                 "quantity": i.quantity,
                 "price": i.price
             }
@@ -239,7 +239,7 @@ def get_all_orders(
     for o in orders:
         items = [
             {
-                "name": i.menu_item.name,
+                "name": i.menu_item.name if i.menu_item else "Unknown Item",
                 "quantity": i.quantity,
                 "price": i.price
             }

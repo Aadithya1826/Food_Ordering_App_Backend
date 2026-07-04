@@ -15,14 +15,16 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",     # React development server
-        "http://localhost:5173",     # Vite development server
+        "http://localhost:3000",
+        "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "http://frontend:3000",      # Docker container
         "http://localhost:8081",     # Expo web
         "http://127.0.0.1:8081",
-        "http://192.168.0.5:8081", # LAN Expo web
+        "http://192.168.0.5:8081",   # LAN Expo web
+        "http://dev-adm-ui.dataudipi.com",
+        "http://dev-cus-ui.dataudipi.com",
     ],
     allow_credentials=True,
     allow_origin_regex=".*",
