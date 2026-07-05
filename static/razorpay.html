@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Secure Razorpay Payment</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f7f9fc;
+        }
+        .container {
+            text-align: center;
+            padding: 24px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            max-width: 90%;
+            width: 320px;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #ff3400;
+            border-radius: 50%;
+            width: 48px;
+            height: 48px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .title {
+            color: #333;
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .btn {
+            background-color: #ff3400;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: bold;
+            border-radius: 24px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: none;
+        }
+        .btn:hover {
+            background-color: #e02d00;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="loader" id="loader"></div>
+        <div class="title" id="title">Processing Payment</div>
+        <div class="subtitle" id="subtitle">Please wait while we connect to Razorpay...</div>
+        <button class="btn" id="retryBtn" onclick="startPayment()">Retry Payment</button>
+    </div>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const amount = urlParams.get('amount');
+        const key = urlParams.get('key') || 'rzp_live_T4wysiHzIDwFA1';
+        const phone = urlParams.get('phone') || '';
+        const redirectUrl = urlParams.get('redirect_url') || 'restaurantnative://payment-callback';
+
+        function updateStatus(title, subtitle, showRetry = false) {
+            document.getElementById('title').innerText = title;
+            document.getElementById('subtitle').innerText = subtitle;
+            if (showRetry) {
+                document.getElementById('loader').style.display = 'none';
+                document.getElementById('retryBtn').style.display = 'inline-block';
+            } else {
+                document.getElementById('loader').style.display = 'block';
+                document.getElementById('retryBtn').style.display = 'none';
+            }
+        }
+
+        async function startPayment() {
+            if (!amount) {
+                updateStatus('Error', 'Invalid amount specified. Please try again.', false);
+                setTimeout(() => {
+                    window.location.href = `${redirectUrl}?status=failed&reason=missing_amount`;
+                }, 2000);
+                return;
+            }
+
+            updateStatus('Connecting', 'Creating secure order...');
+
+            try {
+                // 1. Create order on backend securely
+                const orderRes = await fetch('../api/payments/create-order', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ amount: parseFloat(amount) })
+                });
+                
+                const rzpOrder = await orderRes.json();
+                
+                if (!rzpOrder.success) {
+                    throw new Error(rzpOrder.message || 'Failed to create order');
+                }
+
+                updateStatus('Connecting', 'Opening Razorpay checkout overlay...');
+
+                // 2. Open Razorpay Modal
+                const options = {
+                    key: key,
+                    amount: rzpOrder.order.amount,
+                    currency: rzpOrder.order.currency,
+                    name: 'Data Udipi',
+                    description: 'Food Order Payment',
+                    order_id: rzpOrder.order.id,
+                    handler: function(response) {
+                        updateStatus('Success', 'Payment completed successfully! Returning to app...');
+                        const paymentId = response.razorpay_payment_id;
+                        const orderId = response.razorpay_order_id || '';
+                        const signature = response.razorpay_signature || '';
+                        setTimeout(() => {
+                            const sep = redirectUrl.includes('?') ? '&' : '?';
+                            window.location.href = `${redirectUrl}${sep}status=success&payment_id=${paymentId}&order_id=${orderId}&signature=${signature}`;
+                        }, 1000);
+                    },
+                    prefill: {
+                        contact: phone
+                    },
+                    theme: {
+                        color: '#ff3400'
+                    },
+                    modal: {
+                        ondismiss: function() {
+                            updateStatus('Cancelled', 'Payment was cancelled. Returning to app...', true);
+                            setTimeout(() => {
+                                const sep = redirectUrl.includes('?') ? '&' : '?';
+                                window.location.href = `${redirectUrl}${sep}status=cancelled`;
+                            }, 1000);
+                        }
+                    }
+                };
+
+                const rzp = new window.Razorpay(options);
+                rzp.on('payment.failed', function (response) {
+                    updateStatus('Error', 'Payment failed. Returning to app...', true);
+                    setTimeout(() => {
+                        const sep = redirectUrl.includes('?') ? '&' : '?';
+                        window.location.href = `${redirectUrl}${sep}status=failed&reason=${encodeURIComponent(response.error.description)}`;
+                    }, 1000);
+                });
+                
+                rzp.open();
+
+            } catch (err) {
+                console.error(err);
+                updateStatus('Error', 'Failed to load Razorpay. Check your internet connection.', true);
+            }
+        }
+
+        // Run payment initialization
+        window.onload = startPayment;
+    </script>
+</body>
+</html>

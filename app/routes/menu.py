@@ -34,6 +34,17 @@ def get_categories(
 
     return query.all()
 
+# GET public categories
+@router.get("/api/v1/public/menu/categories", response_model=list[MenuCategoryResponse])
+def get_public_categories(
+    restaurant_id: int | None = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuCategory)
+    if restaurant_id is not None:
+        query = query.filter(MenuCategory.restaurant_id == restaurant_id)
+    return query.all()
+
 # GET items
 @router.get("/api/v1/menu/items", response_model=list[MenuItemResponse])
 def get_items(
@@ -55,6 +66,18 @@ def get_items(
         query = query.filter(MenuItem.restaurant_id == restaurant_id)
 
     return query.all()
+
+# GET public items
+@router.get("/api/v1/public/menu/items", response_model=list[MenuItemResponse])
+def get_public_items(
+    restaurant_id: int | None = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuItem)
+    if restaurant_id is not None:
+        query = query.filter(MenuItem.restaurant_id == restaurant_id)
+    return query.all()
+
 
 def generate_and_update_image(item_id: int, item_name: str, item_description: str):
     db = SessionLocal()
