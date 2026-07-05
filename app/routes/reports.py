@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, or_, and_
 from datetime import datetime, timedelta
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
@@ -32,8 +32,16 @@ def get_reports(
     week_start = today_start - timedelta(days=now.weekday())
     month_start = today_start.replace(day=1)
 
+    paid_condition = or_(
+        func.lower(Order.payment_status) == "paid",
+        and_(
+            or_(Order.payment_status.is_(None), Order.payment_status == ""),
+            Order.status.in_(["SERVED", "COMPLETED"])
+        )
+    )
+
     def get_revenue(start_date=None, end_date=None):
-        q = db.query(func.sum(Order.total_amount)).filter(func.lower(Order.payment_status) == "paid")
+        q = db.query(func.sum(Order.total_amount)).filter(paid_condition)
         if restaurant_id:
             q = q.filter(Order.restaurant_id == restaurant_id)
         if start_date:
@@ -69,7 +77,7 @@ def get_reports(
     month_change = calculate_change(month_rev, last_month_rev)
     
     # Avg order value
-    base_q = db.query(Order).filter(func.lower(Order.payment_status) == "paid")
+    base_q = db.query(Order).filter(paid_condition)
     if restaurant_id:
         base_q = base_q.filter(Order.restaurant_id == restaurant_id)
     
@@ -97,7 +105,7 @@ def get_reports(
         })
 
     # Payment Methods
-    pm_query = db.query(Order.payment_method, func.sum(Order.total_amount)).filter(func.lower(Order.payment_status) == "paid")
+    pm_query = db.query(Order.payment_method, func.sum(Order.total_amount)).filter(paid_condition)
     if restaurant_id:
         pm_query = pm_query.filter(Order.restaurant_id == restaurant_id)
     payment_methods = pm_query.group_by(Order.payment_method).all()
@@ -119,7 +127,7 @@ def get_reports(
     # Top Items
     top_items_query = db.query(
         OrderItem.menu_item_id, func.sum(OrderItem.quantity).label("total_qty")
-    ).join(Order).filter(func.lower(Order.payment_status) == "paid")
+    ).join(Order).filter(paid_condition)
     if restaurant_id:
         top_items_query = top_items_query.filter(Order.restaurant_id == restaurant_id)
     top_items = top_items_query.group_by(OrderItem.menu_item_id).order_by(desc("total_qty")).limit(4).all()
@@ -130,7 +138,7 @@ def get_reports(
         if menu_item:
             item_rev_query = db.query(func.sum(OrderItem.price * OrderItem.quantity)).join(Order).filter(
                 OrderItem.menu_item_id == item_id,
-                func.lower(Order.payment_status) == "paid"
+                paid_condition
             )
             if restaurant_id:
                 item_rev_query = item_rev_query.filter(Order.restaurant_id == restaurant_id)
@@ -142,8 +150,8 @@ def get_reports(
             })
 
     # Order Breakdown
-    dine_in_count = base_q.filter(Order.table_id.isnot(None)).count()
-    takeaway_total = base_q.filter(Order.table_id.is_(None)).count()
+    dine_in_count = base_q.filter(Order.table_id.isnot(None), Order.table_id != 'takeaway').count()
+    takeaway_total = base_q.filter(or_(Order.table_id.is_(None), Order.table_id == 'takeaway')).count()
     
     delivery_count = int(takeaway_total * 0.5)
     takeaway_count = takeaway_total - delivery_count
@@ -163,7 +171,7 @@ def get_reports(
             Order.restaurant_id, 
             func.sum(Order.total_amount).label("rev"), 
             func.count(Order.id).label("cnt")
-        ).filter(func.lower(Order.payment_status) == "paid").group_by(Order.restaurant_id).order_by(desc("rev")).limit(5).all()
+        ).filter(paid_condition).group_by(Order.restaurant_id).order_by(desc("rev")).limit(5).all()
 
         for r_id, rev, cnt in top_hotels_query:
             r = db.query(Restaurant).filter(Restaurant.id == r_id).first()
