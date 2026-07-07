@@ -411,25 +411,31 @@ TOOL_REGISTRY = {
 TOOL_REGISTRY.update(EXTENDED_TOOLS)
 
 
-def build_tool_prompt(user, is_voice: bool = False) -> str:
+def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -> str:
     lines = [
         "You are a restaurant voice assistant. You may receive text or an audio file from the user.",
         "If audio is provided, carefully transcribe and understand the user's spoken words. They may use regional accents, Thanglish, or Hinglish.",
-        "Return only valid JSON with the keys: transcribed_user_text, tool_name, params, assistant_text.",
+    ]
+    
+    if not is_followup:
+        lines.append("Return only valid JSON with the keys: transcribed_user_text, tool_name, params, assistant_text.")
+        
+    lines.extend([
         "CRITICAL INSTRUCTION: Adopt a normal, everyday conversational tone. Do not be overly formal (like a robot) and do not be overly informal (avoid heavy slang like 'macha' or 'bhai').",
         "- You MUST strictly match the language of the user's MOST RECENT message. If the user speaks English, you MUST reply in English. Do NOT default to regional languages. Respond in regional languages (Tamil, Hindi, Thanglish, Hinglish) ONLY IF the user speaks them in their most recent message.",
         "- ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. For Tamil, use ONLY standard Unicode U+0B80-U+0BFF.",
-    ]
+    ])
     
     if not is_voice:
         lines.append("CRITICAL FONT RULE: Whenever you respond in a regional language or slang (like Tamil or Hindi), you MUST write the 'assistant_text' using the English (Latin) alphabet (i.e., use Thanglish or Hinglish). DO NOT use native scripts (like Tamil or Devanagari) because the frontend UI fonts do not support them.")
     else:
         lines.append("For voice interactions, if the user speaks in a regional language (like Tamil or Hindi), you MUST write the 'assistant_text' in that exact native script (e.g. Tamil letters) so our Text-to-Speech engine can pronounce it correctly. Do NOT write it in English letters for voice responses, use the native alphabet.")
         
-    lines.extend([
-        "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
-        "If no tool is needed, set tool_name to null and provide assistant_text.",
-    ])
+    if not is_followup:
+        lines.extend([
+            "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
+            "If no tool is needed, set tool_name to null and provide assistant_text.",
+        ])
     
     # Add role-specific context
     if user.role == "SUPER_ADMIN":
@@ -441,14 +447,16 @@ def build_tool_prompt(user, is_voice: bool = False) -> str:
     else:
         lines.append("You are speaking with a staff member with limited access.")
 
-    lines.append("Available tools:")
-    for name, metadata in TOOL_REGISTRY.items():
-        lines.append(f"- {name}: {metadata['description']}")
-        if metadata["parameters"]:
-            for key, desc in metadata["parameters"].items():
-                lines.append(f"  * {key}: {desc}")
-    lines.append("Example JSON output:")
-    lines.append('{"tool_name":"search_menu_item","params":{"name":"cheese pizza"},"assistant_text":"I found matching menu items for you."}')
+    if not is_followup:
+        lines.append("Available tools:")
+        for name, metadata in TOOL_REGISTRY.items():
+            lines.append(f"- {name}: {metadata['description']}")
+            if metadata["parameters"]:
+                for key, desc in metadata["parameters"].items():
+                    lines.append(f"  * {key}: {desc}")
+        lines.append("Example JSON output:")
+        lines.append('{"tool_name":"search_menu_item","params":{"name":"cheese pizza"},"assistant_text":"I found matching menu items for you."}')
+        
     return "\n".join(lines)
 
 

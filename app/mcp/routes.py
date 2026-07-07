@@ -100,8 +100,11 @@ async def natural_language_query(
             # --- Second Pass: Ask Gemini to summarize the tool result ---
             final_assistant_text = assistant_text or f"Invoked tool {tool_name}"
             actual_user_text = transcribed_user_text if transcribed_user_text else request.prompt
+            
+            clean_instructions = build_tool_prompt(user, is_voice=request.is_voice, is_followup=True)
+            
             followup_prompt = (
-                f"{prompt}\n\n"
+                f"{clean_instructions}\n\n"
                 f"The user said: {actual_user_text}\n"
                 f"You used the tool '{tool_name}' which returned this result:\n{result}\n\n"
                 "Provide a natural, conversational response to the user summarizing this data. "
