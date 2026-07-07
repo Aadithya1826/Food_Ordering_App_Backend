@@ -22,6 +22,8 @@ app.add_middleware(
         "http://frontend:3000",      # Docker container
         "http://dev-adm-ui.dataudipi.com",
         "https://dev-adm-ui.dataudipi.com",
+        "http://dev-cus-ui.dataudipi.com",
+        "https://dev-cus-ui.dataudipi.com",
         "http://dev-ui.dataudipi.com",
         "https://dev-ui.dataudipi.com"
     ],

@@ -10,6 +10,7 @@ from ..models.table import Table
 from ..models.inventory import InventoryItem
 from ..schemas.order import OrderCreate
 from ..utils.roles import filter_by_user_restaurant, require_role, require_restaurant_access
+from ..utils.table_refs import parse_numeric_table_id
 from .tools_extended import EXTENDED_TOOLS
 
 
@@ -81,8 +82,15 @@ def get_order_status(db: Session, user, order_id: int = None, table_number: str 
         table = query.first()
         if not table:
             raise HTTPException(status_code=404, detail=f"Table '{table_number}' not found")
-            
-        order = db.query(Order).filter(Order.table_id == table.id, Order.status.notin_(["COMPLETED", "CANCELLED"])).order_by(Order.created_at.desc()).first()
+
+        active_orders = filter_by_user_restaurant(
+            user,
+            db.query(Order).filter(Order.status.notin_(["COMPLETED", "CANCELLED"])).order_by(Order.created_at.desc())
+        ).all()
+        order = next(
+            (candidate for candidate in active_orders if parse_numeric_table_id(candidate.table_id) == table.id),
+            None,
+        )
 
     if not order:
         if table_number:

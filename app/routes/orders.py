@@ -5,6 +5,7 @@ from ..models.order import Order, OrderItem
 from ..schemas.order import OrderStatusUpdate, OrderPaymentStatusUpdate
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id, require_restaurant_access
+from ..utils.table_refs import build_table_number_map, resolve_order_table_number
 
 router = APIRouter()
 
@@ -26,13 +27,13 @@ def get_live_orders(
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     query = db.query(Order).options(
-        joinedload(Order.items).joinedload(OrderItem.menu_item),
-        joinedload(Order.table)
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(Order.status != "SERVED")
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 
     orders = query.all()
+    table_number_map = build_table_number_map(db, orders)
     response = []
     for o in orders:
         items = [
@@ -51,7 +52,7 @@ def get_live_orders(
 
         response.append({
             "order_id": o.id,
-            "table_number": "Takeaway" if str(o.table_id).lower() == "takeaway" else (o.table.table_number if o.table else "N/A"),
+            "table_number": resolve_order_table_number(o, table_number_map),
             "status": o.status,
             "payment_method": method,
             "payment_status": p_status,
@@ -120,15 +121,15 @@ def get_all_orders(
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     query = db.query(Order).options(
-        joinedload(Order.items).joinedload(OrderItem.menu_item),
-        joinedload(Order.table)
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
     )
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 
     # For payment dashboard, ordering by latest first
     orders = query.order_by(Order.created_at.desc()).all()
-    
+    table_number_map = build_table_number_map(db, orders)
+
     response = []
     for o in orders:
         items = [
@@ -147,7 +148,7 @@ def get_all_orders(
 
         response.append({
             "order_id": o.id,
-            "table_number": "Takeaway" if str(o.table_id).lower() == "takeaway" else (o.table.table_number if o.table else "N/A"),
+            "table_number": resolve_order_table_number(o, table_number_map),
             "status": o.status,
             "payment_method": method,
             "payment_status": p_status,
