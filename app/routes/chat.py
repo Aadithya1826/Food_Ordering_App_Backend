@@ -1,19 +1,24 @@
 from fastapi import APIRouter, Request, HTTPException
 import httpx
 import os
+from app.services.prompt_builder import build_home_agent_prompt, build_full_page_prompt, build_voice_agent_prompt
 
 router = APIRouter()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-if GEMINI_MODEL in ["gemini-1.5-pro", "gemini-2.5-pro"]:
-    GEMINI_MODEL = "gemini-1.5-flash"
-
-GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
+# Values fetched dynamically to ensure they are loaded after dotenv
+def get_gemini_config():
+    api_key = os.getenv("GEMINI_API_KEY")
+    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    if model in ["gemini-1.5-pro", "gemini-2.5-pro"]:
+        model = "gemini-1.5-flash"
+    base_url = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
+    return api_key, model, base_url
 
 @router.post("/api/chat")
 async def proxy_chat(request: Request):
-    if not GEMINI_API_KEY:
+    api_key, model, api_base = get_gemini_config()
+    
+    if not api_key:
         raise HTTPException(status_code=500, detail="Gemini API Key not configured")
 
     try:
@@ -21,8 +26,22 @@ async def proxy_chat(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    base_url = GEMINI_API_BASE.replace("v1beta2", "v1beta")
-    url = f"{base_url}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    mode = payload.pop("mode", None)
+    context = payload.pop("context", {})
+
+    if mode == "home_assistant":
+        system_instruction = build_home_agent_prompt(context.get("language", "English"))
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    elif mode == "full_page":
+        system_instruction = build_full_page_prompt(context.get("language", "English"))
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    elif mode == "voice_assistant":
+        system_instruction = build_voice_agent_prompt(context)
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    # If mode is not provided, we pass the payload directly to Gemini (fallback)
+
+    base_url = api_base.replace("v1beta2", "v1beta")
+    url = f"{base_url}/models/{model}:generateContent?key={api_key}"
     
     async with httpx.AsyncClient(timeout=30) as client:
         try:
