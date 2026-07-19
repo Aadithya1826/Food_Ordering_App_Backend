@@ -1,8 +1,12 @@
 import os
-import razorpay
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
+
+try:
+    import razorpay
+except Exception:
+    razorpay = None
 
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
 
@@ -12,7 +16,7 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 # Initialize client only if we have the secret
 client = None
-if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
+if razorpay and RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
     try:
         client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
     except Exception as e:
@@ -28,6 +32,12 @@ class VerifyPaymentRequest(BaseModel):
 
 @router.post("/create-order")
 def create_order(req: CreateOrderRequest):
+    if razorpay is None:
+        return {
+            "success": False,
+            "message": "Razorpay integration is unavailable on this server. Falling back to direct checkout."
+        }
+
     if not RAZORPAY_KEY_SECRET:
         # Return success=False to notify the frontend to fallback
         return {

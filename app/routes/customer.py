@@ -8,10 +8,15 @@ from ..models.table import Table
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import os
-import razorpay
 import hmac
 import hashlib
 import time
+from ..utils.table_refs import build_table_number_map, resolve_order_table_number
+
+try:
+    import razorpay
+except Exception:
+    razorpay = None
 
 router = APIRouter(tags=["Customer"])
 
@@ -132,6 +137,9 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int = 1, db: Sessi
 @router.post("/api/create-razorpay-order")
 def create_razorpay_order(payload: RazorpayOrderPayload):
     try:
+        if razorpay is None:
+            raise HTTPException(status_code=503, detail="Razorpay integration is unavailable on this server")
+
         key_id = os.getenv("RAZORPAY_KEY_ID")
         key_secret = os.getenv("RAZORPAY_KEY_SECRET")
         if not key_id or not key_secret:
@@ -149,6 +157,8 @@ def create_razorpay_order(payload: RazorpayOrderPayload):
         
         order = client.order.create(data=data)
         return {"success": True, "order": order}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -180,7 +190,9 @@ def get_order_by_id(order_id: int, restaurant_id: int = 1, db: Session = Depends
     order = db.query(Order).filter(Order.id == order_id, Order.restaurant_id == restaurant_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-        
+
+    table_number_map = build_table_number_map(db, [order])
+
     items = []
     for oi in order.items:
         items.append({
@@ -199,7 +211,7 @@ def get_order_by_id(order_id: int, restaurant_id: int = 1, db: Session = Depends
         "orderId": f"ORD-{str(order.id).zfill(6)}",
         "restaurant_id": order.restaurant_id,
         "table_id": order.table_id,
-        "table_number": order.table.table_number if order.table else "Takeaway",
+        "table_number": resolve_order_table_number(order, table_number_map),
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,

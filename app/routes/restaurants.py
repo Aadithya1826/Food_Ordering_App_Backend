@@ -51,12 +51,19 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
         
         manager_name = manager.name if manager else None
         
-        from sqlalchemy import func
+        from sqlalchemy import func, or_, and_
         stats = db.query(
             func.count(Order.id).label("total_orders"),
             func.sum(Order.total_amount).label("total_revenue")
         ).filter(
             Order.restaurant_id == restaurant.id,
+            or_(
+                func.lower(Order.payment_status) == "paid",
+                and_(
+                    or_(Order.payment_status.is_(None), Order.payment_status == ""),
+                    Order.status.in_(["SERVED", "COMPLETED"])
+                )
+            )
         ).first()
 
         orders_count = stats.total_orders or 0

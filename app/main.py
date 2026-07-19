@@ -6,7 +6,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, payments, chat
+from .routes import auth, menu, orders, table, inventory, restaurants, reports
 from .mcp import router as mcp_router
 
 app = FastAPI()
@@ -19,19 +19,19 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
+        "http://localhost:3000",     # React development server
+        "http://localhost:5173",     # Vite development server
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "http://frontend:3000",      # Docker container
-        "http://localhost:8081",     # Expo web
-        "http://127.0.0.1:8081",
-        "http://192.168.0.5:8081",   # LAN Expo web
         "http://dev-adm-ui.dataudipi.com",
+        "https://dev-adm-ui.dataudipi.com",
         "http://dev-cus-ui.dataudipi.com",
+        "https://dev-cus-ui.dataudipi.com",
+        "http://dev-ui.dataudipi.com",
+        "https://dev-ui.dataudipi.com"
     ],
     allow_credentials=True,
-    allow_origin_regex=".*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -43,7 +43,4 @@ app.include_router(table.router)
 app.include_router(inventory.router)
 app.include_router(restaurants.router)
 app.include_router(reports.router)
-app.include_router(customer.router)
-app.include_router(payments.router)
-app.include_router(chat.router)
 app.include_router(mcp_router)

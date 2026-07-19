@@ -109,14 +109,37 @@ class GeminiClient:
             
         trimmed = trimmed.strip()
 
-        json_text = self._extract_first_json_object(trimmed)
-        if not json_text:
-            return None
-
         try:
-            return json.loads(json_text)
+            return json.loads(trimmed)
         except json.JSONDecodeError:
-            return None
+            pass
+
+        json_text = self._extract_first_json_object(trimmed)
+        if json_text:
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                pass
+                
+        # Last resort: Salvage partial/truncated JSON using regex
+        result = {}
+        tool_match = re.search(r'"tool_name"\s*:\s*(null|"[^"]+")', trimmed)
+        if tool_match:
+            val = tool_match.group(1)
+            result["tool_name"] = None if val == "null" else val.strip('"')
+            
+        params_match = re.search(r'"params"\s*:\s*({[^}]*})', trimmed)
+        if params_match:
+            try:
+                result["params"] = json.loads(params_match.group(1))
+            except:
+                result["params"] = {}
+                
+        txt_match = re.search(r'"transcribed_user_text"\s*:\s*"([^"]+)"', trimmed)
+        if txt_match:
+            result["transcribed_user_text"] = txt_match.group(1)
+            
+        return result if result else None
 
     @staticmethod
     def _extract_first_json_object(text: str) -> str | None:

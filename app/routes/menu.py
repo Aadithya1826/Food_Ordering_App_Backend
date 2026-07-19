@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Request
 import os
 import uuid
 import shutil
@@ -10,6 +10,24 @@ from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id
 
 router = APIRouter()
+
+
+def _parse_public_restaurant_id(request: Request) -> int | None:
+    raw_value = request.query_params.get("restaurant_id")
+    if raw_value is None:
+        raw_value = request.query_params.get("restaurantId")
+
+    if raw_value is None:
+        return None
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "undefined", "null", "none", "all"}:
+        return None
+
+    try:
+        return int(normalized)
+    except ValueError:
+        return None
 
 def get_db():
     db = SessionLocal()
@@ -37,9 +55,10 @@ def get_categories(
 # GET public categories
 @router.get("/api/v1/public/menu/categories", response_model=list[MenuCategoryResponse])
 def get_public_categories(
-    restaurant_id: int | None = None,
+    request: Request,
     db: Session = Depends(get_db)
 ):
+    restaurant_id = _parse_public_restaurant_id(request)
     query = db.query(MenuCategory)
     if restaurant_id is not None:
         query = query.filter(MenuCategory.restaurant_id == restaurant_id)
@@ -70,9 +89,10 @@ def get_items(
 # GET public items
 @router.get("/api/v1/public/menu/items", response_model=list[MenuItemResponse])
 def get_public_items(
-    restaurant_id: int | None = None,
+    request: Request,
     db: Session = Depends(get_db)
 ):
+    restaurant_id = _parse_public_restaurant_id(request)
     query = db.query(MenuItem)
     if restaurant_id is not None:
         query = query.filter(MenuItem.restaurant_id == restaurant_id)
