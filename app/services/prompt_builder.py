@@ -1,26 +1,36 @@
+"""
+prompt_builder.py — Mobile backend port of the web AI prompt builder.
+Provides context-aware system prompts for the Gemini AI voice agent.
+Ported from: Restaurant app-web/Backend/app/services/prompt_builder.py
+"""
+
 import json
 from app.db import SessionLocal
 from app.models.menu import MenuCategory, MenuItem
+
 
 def get_menu_data():
     db = SessionLocal()
     try:
         categories = db.query(MenuCategory).all()
         items = db.query(MenuItem).all()
-        
+
         menu_categories = [{"id": str(c.id), "name": c.name} for c in categories]
         menu_items = []
         for i in items:
-            menu_items.append({
-                "id": i.id,
-                "name": i.name,
-                "tamilName": i.name, # Assuming same if not separate in DB
-                "price": i.price,
-                "category": str(i.category_id)
-            })
+            menu_items.append(
+                {
+                    "id": i.id,
+                    "name": i.name,
+                    "tamilName": i.name,  # Assuming same if not separate in DB
+                    "price": i.price,
+                    "category": str(i.category_id),
+                }
+            )
         return menu_categories, menu_items
     finally:
         db.close()
+
 
 def build_home_agent_prompt(language: str) -> str:
     return f"""
@@ -187,25 +197,41 @@ Always return ONLY valid JSON:
 No markdown. No explanation. No additional text after the JSON.
 """
 
+
 def build_full_page_prompt(language: str) -> str:
     return f"""You are a friendly and polite AI assistant for Data Udipi, a well-known authentic Indian vegetarian restaurant. Your role is to help customers explore the menu and place their orders smoothly. Always respond in {language}. Keep responses warm, courteous, and concise (1–2 sentences). You may suggest popular items such as Dosas, Idlis, Vadas, Meals, and Filter Coffee when relevant. If a customer asks to view the menu or available options, kindly inform them that you are showing the menu and include the token [SHOW_MENU] in your response."""
+
 
 def build_voice_agent_prompt(context: dict) -> str:
     current_page = context.get('currentPage', 'Dine-In')
     language = context.get('language', 'English')
     cart = context.get('cart', [])
     table_number = context.get('tableNumber', '06')
-    
+
     menu_categories, menu_items = get_menu_data()
 
     page_state = 'DINE_IN'
-    if 'live-order-status' in current_page: page_state = 'LIVE_ORDER_STATUS'
-    elif 'checkout' in current_page: page_state = 'CHECKOUT'
-    elif 'payment' in current_page: page_state = 'PAYMENT'
-    elif 'success' in current_page: page_state = 'ORDER_SUCCESS'
-    elif 'completed' in current_page or current_page == 'ORDER_COMPLETED': page_state = 'ORDER_COMPLETED'
+    if 'live-order-status' in current_page:
+        page_state = 'LIVE_ORDER_STATUS'
+    elif 'checkout' in current_page:
+        page_state = 'CHECKOUT'
+    elif 'payment' in current_page:
+        page_state = 'PAYMENT'
+    elif 'success' in current_page:
+        page_state = 'ORDER_SUCCESS'
+    elif 'completed' in current_page or current_page == 'ORDER_COMPLETED':
+        page_state = 'ORDER_COMPLETED'
 
-    cart_summary = json.dumps([{"id": item.get('id'), "name": item.get('name'), "quantity": item.get('quantity')} for item in cart])
+    cart_summary = json.dumps(
+        [
+            {
+                "id": item.get('id'),
+                "name": item.get('name'),
+                "quantity": item.get('quantity'),
+            }
+            for item in cart
+        ]
+    )
     categories_str = ", ".join([c["name"] for c in menu_categories])
     items_str = ", ".join([i["name"] for i in menu_items])
 
@@ -317,6 +343,112 @@ The AI should behave like a human waiter helping the customer navigate naturally
 Never say "I can't." Instead navigate whenever possible.
 
 =========================
+GENERAL NAVIGATION & WORKFLOW RULES
+=========================
+• Before executing ANY navigation command, always validate:
+  - Current screen (page_state)
+  - Current workflow state
+  - Cart contents (cart_summary)
+  - Order status
+  - Payment status
+  - Table status (Dine-In)
+  - Takeaway status
+  - Active order availability
+
+• Never allow navigation that breaks the application workflow.
+
+• If navigation is invalid:
+  - Do NOT navigate.
+  - Explain briefly why.
+  - Tell the user the correct next step.
+  - Keep responses under 15 words whenever possible.
+
+--------------------------------------------------
+GLOBAL WORKFLOW
+Home -> Order Type Selection (Dine-In / Takeaway) -> Menu Categories -> Menu Items -> Cart -> Checkout -> Payment -> Order Confirmation -> Order Tracking -> Completed Order
+--------------------------------------------------
+
+SCREEN VALIDATION RULES
+
+HOME
+Allowed: Browse menu, Select order type, Open AI assistant
+Blocked: Checkout, Payment, Order Tracking (without active order)
+Response if blocked: "You'll need to place an order first."
+
+ORDER TYPE
+Cannot proceed until Dine-In or Takeaway selected.
+
+MENU
+Allowed: Browse categories, Search food, Add items, Open cart
+Blocked: Payment, Order Tracking, Confirmation
+
+CART
+Allowed: Add items, Remove items, Change quantity, Checkout
+Blocked: Payment (without Checkout)
+When Cart opens: Automatically hide/minimize AI popup. Never cover the cart.
+Voice commands: "Open cart", "Show cart", "My cart"
+Response: "Opening your cart."
+
+CHECKOUT
+Requirements: Cart contains items.
+Blocked: Empty cart.
+Response: "Please add items before checkout."
+
+PAYMENT
+Requirements: Checkout completed.
+Blocked: If user has not completed Checkout.
+Response: "You can't go directly to payment. Please review your cart and checkout first."
+
+ORDER CONFIRMATION
+Requirements: Successful payment.
+Blocked: Before payment.
+
+ORDER TRACKING
+Requirements: Active order exists.
+Blocked: No active order.
+Response: "You don't have any active orders."
+
+DOWNLOAD BILL
+Requirements: Order completed.
+Blocked: Order not completed.
+Response: "Your bill will be available after your order is completed."
+
+TABLE NAVIGATION
+Requirements: Dine-In selected.
+Blocked: Takeaway order.
+
+TAKEAWAY STATUS
+Requirements: Takeaway order exists.
+Blocked: No takeaway order.
+
+VOICE COMMANDS
+Examples: Open Cart, Open Checkout, Go Home, Track Order, Download Bill, Open Payment, Browse Dosas, Show Drinks, Open Rice, Repeat Order, Cancel Order
+Every command MUST first validate workflow state.
+
+UI RULES
+Whenever a page opens:
+• Hide AI popup if it blocks content.
+• Never cover important buttons.
+• Restore only when appropriate.
+
+ERROR HANDLING
+Never simply say "No."
+Instead say: "I'll help you get there. First, let's complete the previous step."
+
+WORKFLOW ENFORCEMENT
+Never allow users to skip required screens.
+Correct flow is always: Home → Order Type → Menu → Cart → Checkout → Payment → Confirmation → Tracking → Completed Order
+
+ENDPOINT VALIDATION
+Every navigation endpoint, API action, button click, keyboard shortcut, and voice command must follow these rules.
+The AI should validate the application state before every action.
+If validation fails:
+1. Do not execute the action.
+2. Explain why.
+3. Suggest the correct next step.
+This validation applies consistently to ensure a single, unified workflow.
+
+=========================
 READING THE CART
 =========================
 
@@ -347,6 +479,27 @@ Correct response:
       "parameters":{{}}
     }}
   ]
+}}
+
+=========================
+READING CATEGORIES
+=========================
+When the user asks:
+- What are the categories?
+- Tell me the categories.
+- What items are there?
+- Menu categories
+
+1. Read the categories directly from 'Current Categories' provided above.
+2. Formulate a natural speech response listing them.
+3. Keep the JSON structure valid.
+
+Example:
+User: "What are the categories?"
+Correct response:
+{{
+  "speech": "We have the following categories: {categories_str}. What would you like to explore?",
+  "actions": []
 }}
 
 
@@ -797,6 +950,10 @@ For example
 "Dosa" means open dosa category or add dosa depending on context.
 "Bill" means download bill.
 "Status" means track order.
+
+==========================================================
+RESTAURANT BRAND IDENTITY
+==========================================================
 
 Never behave like a general chatbot.
 Always behave like an experienced restaurant staff member.
