@@ -158,3 +158,76 @@ def get_all_orders(
         })
 
     return response
+from pydantic import BaseModel
+from typing import List
+
+class PosCartItem(BaseModel):
+    id: int
+    quantity: int
+    price: float
+
+class PosOrderPayload(BaseModel):
+    table_number: str = "takeaway"
+    payment_method: str = "Cash"
+    cart: List[PosCartItem] = []
+    total_amount: float = 0
+
+from ..models.table import Table
+
+@router.post("/api/v1/orders", response_model=dict)
+def create_pos_order(
+    payload: PosOrderPayload,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+        res_id = resolve_restaurant_id(user, restaurant_id)
+        if not res_id:
+            raise HTTPException(status_code=400, detail="restaurant_id is required")
+
+        is_takeaway = (
+            not payload.table_number or 
+            payload.table_number.lower().replace(" ", "").replace("-", "") == "takeaway"
+        )
+        if is_takeaway:
+            table_id = None
+        else:
+            table = db.query(Table).filter(Table.table_number == payload.table_number, Table.restaurant_id == res_id).first()
+            if not table:
+                table = Table(table_number=payload.table_number, restaurant_id=res_id, capacity=4, status="Occupied")
+                db.add(table)
+                db.commit()
+                db.refresh(table)
+            table_id = table.id
+
+        status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
+        payment_status = "Paid" if payload.payment_method.lower() in ["cash", "upi", "card"] else "Pending"
+
+        new_order = Order(
+            restaurant_id=res_id,
+            table_id=table_id,
+            total_amount=payload.total_amount,
+            status=status,
+            payment_status=payment_status,
+            payment_method=payload.payment_method
+        )
+        db.add(new_order)
+        db.commit()
+        db.refresh(new_order)
+
+        for item in payload.cart:
+            order_item = OrderItem(
+                order_id=new_order.id,
+                menu_item_id=item.id,
+                quantity=item.quantity,
+                price=item.price
+            )
+            db.add(order_item)
+        db.commit()
+
+        return {"orderId": new_order.id, "message": "Order created successfully"}
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}

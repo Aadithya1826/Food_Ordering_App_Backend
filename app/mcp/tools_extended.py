@@ -7,6 +7,7 @@ from ..models.order import Order, OrderItem
 from ..models.table import Table
 from ..models.inventory import InventoryItem
 from ..models.user import User
+from ..models.restaurant import Restaurant
 from ..utils.roles import filter_by_user_restaurant, require_role, require_restaurant_access
 
 # Orders & Payments
@@ -160,6 +161,52 @@ def get_item_sales_report(db: Session, user, item_name: str | None = None, timef
     results.sort(key=lambda x: x["revenue"], reverse=True)
     return results
 
+# Restaurants
+def create_restaurant(db: Session, user, name: str, address: str = None, phone: str = None) -> dict:
+    require_role(user, ["SUPER_ADMIN"])
+    existing = db.query(Restaurant).filter(Restaurant.name == name).first()
+    if existing: raise HTTPException(400, "Restaurant name already exists")
+    restaurant = Restaurant(name=name, address=address, phone=phone)
+    db.add(restaurant)
+    db.commit()
+    db.refresh(restaurant)
+    return {"message": f"Hotel {name} created", "id": restaurant.id}
+
+def update_restaurant(db: Session, user, restaurant_id: int, name: str = None, address: str = None, phone: str = None) -> dict:
+    require_role(user, ["SUPER_ADMIN"])
+    restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+    if not restaurant: raise HTTPException(404, "Restaurant not found")
+    if name is not None:
+        restaurant.name = name
+    if address is not None:
+        restaurant.address = address
+    if phone is not None:
+        restaurant.phone = phone
+    db.commit()
+    return {"message": f"Hotel {restaurant.name} updated"}
+
+def delete_restaurant(db: Session, user, restaurant_id: int) -> dict:
+    require_role(user, ["SUPER_ADMIN"])
+    restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+    if not restaurant: raise HTTPException(404, "Restaurant not found")
+    
+    db.query(User).filter(User.restaurant_id == restaurant_id).update({"restaurant_id": None})
+    db.query(InventoryItem).filter(InventoryItem.restaurant_id == restaurant_id).delete(synchronize_session=False)
+
+    order_ids = db.query(Order.id).filter(Order.restaurant_id == restaurant_id).all()
+    order_ids = [o[0] for o in order_ids]
+    if order_ids:
+        db.query(OrderItem).filter(OrderItem.order_id.in_(order_ids)).delete(synchronize_session=False)
+
+    db.query(Order).filter(Order.restaurant_id == restaurant_id).delete(synchronize_session=False)
+    db.query(MenuItem).filter(MenuItem.restaurant_id == restaurant_id).delete(synchronize_session=False)
+    db.query(MenuCategory).filter(MenuCategory.restaurant_id == restaurant_id).delete(synchronize_session=False)
+    db.query(Table).filter(Table.restaurant_id == restaurant_id).delete(synchronize_session=False)
+
+    db.delete(restaurant)
+    db.commit()
+    return {"message": f"Hotel {restaurant.name} deleted"}
+
 # Managers
 def get_managers(db: Session, user) -> list[dict]:
     require_role(user, ["SUPER_ADMIN"])
@@ -296,5 +343,31 @@ EXTENDED_TOOLS = {
             "manager_id": "ID of the manager to delete."
         },
         "handler": delete_manager,
+    },
+    "create_restaurant": {
+        "description": "SUPER_ADMIN ONLY. Create a new hotel/restaurant.",
+        "parameters": {
+            "name": "Name of the hotel.",
+            "address": "Optional. Address of the hotel.",
+            "phone": "Optional. Phone number."
+        },
+        "handler": create_restaurant,
+    },
+    "update_restaurant": {
+        "description": "SUPER_ADMIN ONLY. Update an existing hotel/restaurant.",
+        "parameters": {
+            "restaurant_id": "ID of the hotel to update.",
+            "name": "Optional. New name of the hotel.",
+            "address": "Optional. New address.",
+            "phone": "Optional. New phone number."
+        },
+        "handler": update_restaurant,
+    },
+    "delete_restaurant": {
+        "description": "SUPER_ADMIN ONLY. Delete a hotel/restaurant and all its associated data.",
+        "parameters": {
+            "restaurant_id": "ID of the hotel to delete."
+        },
+        "handler": delete_restaurant,
     }
 }

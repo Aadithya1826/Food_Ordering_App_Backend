@@ -43,7 +43,7 @@ def get_categories(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
     query = db.query(MenuCategory)
@@ -77,7 +77,7 @@ def get_items(
     - SUPER_ADMIN: Sees items from the selected restaurant or all restaurants when no restaurant_id is provided
     - HOTEL_ADMIN: Sees items only from their restaurant
     """
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
     query = db.query(MenuItem)

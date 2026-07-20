@@ -42,6 +42,12 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
                     status_code=403,
                     detail="Hotel manager login requires a hotel manager account assigned to a restaurant."
                 )
+        elif data.role == "CASHIER":
+            if user.role != "CASHIER" or user.restaurant_id is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cashier login requires a cashier account assigned to a restaurant."
+                )
         else:
             raise HTTPException(status_code=400, detail="Invalid login role")
 
@@ -77,12 +83,13 @@ def signup(data: SignupRequest, response: Response, db: Session = Depends(get_db
     if existing_user:
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
-    if data.role not in ["SUPER_ADMIN", "HOTEL_ADMIN"]:
+    if data.role not in ["SUPER_ADMIN", "HOTEL_ADMIN", "CASHIER"]:
         raise HTTPException(status_code=400, detail="Invalid signup role")
 
-    if data.role == "HOTEL_ADMIN":
+    if data.role in ["HOTEL_ADMIN", "CASHIER"]:
         if data.restaurant_id is None:
-            raise HTTPException(status_code=400, detail="Restaurant selection is required for hotel managers")
+            role_display = "hotel managers" if data.role == "HOTEL_ADMIN" else "cashiers"
+            raise HTTPException(status_code=400, detail=f"Restaurant selection is required for {role_display}")
         restaurant = db.query(Restaurant).filter(Restaurant.id == data.restaurant_id).first()
         if not restaurant:
             raise HTTPException(status_code=404, detail="Selected restaurant not found")
