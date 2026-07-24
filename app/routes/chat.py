@@ -25,7 +25,7 @@ async def proxy_chat(request: Request):
     context = payload.pop("context", None)
 
     if "systemInstruction" not in payload:
-        sys_text = "You are a helpful restaurant voice assistant. You must always return a strictly valid JSON object. Do NOT use unescaped newlines."
+        sys_text = "You are a helpful restaurant voice assistant. You must always return a strictly valid JSON object. Do NOT use unescaped newlines. If the user provides audio, accurately transcribe their words into the 'transcript' field. Then determine the appropriate 'action' and 'speech' response."
         if context:
             sys_text += f"\nContext: {context}"
         
@@ -40,13 +40,17 @@ async def proxy_chat(request: Request):
     payload["generationConfig"]["responseSchema"] = {
         "type": "OBJECT",
         "properties": {
+            "transcript": {
+                "type": "STRING",
+                "description": "The exact words spoken by the user, transcribed from audio. Omit if no audio was provided."
+            },
             "speech": {
                 "type": "STRING",
                 "description": "What the AI says back to the user. Ensure no unescaped newlines."
             },
             "action": {
                 "type": "STRING",
-                "description": "Action command like ADD_ITEM, REMOVE_ITEM, OPEN_MENU, CLEAR_CART, TRACK_ORDER, SHOW_HELP."
+                "description": "Action command like ADD_ITEM, REMOVE_ITEM, OPEN_MENU, CLEAR_CART, TRACK_ORDER, SHOW_HELP, UPDATE_DETAILS, PROCEED_TO_PAYMENT."
             },
             "parameters": {
                 "type": "OBJECT",
