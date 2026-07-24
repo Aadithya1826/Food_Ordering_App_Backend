@@ -21,6 +21,71 @@ async def proxy_chat(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
+    mode = payload.pop("mode", None)
+    context = payload.pop("context", None)
+
+    if "systemInstruction" not in payload:
+        sys_text = "You are a helpful restaurant voice assistant. You must always return a strictly valid JSON object. Do NOT use unescaped newlines."
+        if context:
+            sys_text += f"\nContext: {context}"
+        
+        payload["systemInstruction"] = {
+            "parts": [{"text": sys_text}]
+        }
+
+    if "generationConfig" not in payload:
+        payload["generationConfig"] = {}
+        
+    payload["generationConfig"]["responseMimeType"] = "application/json"
+    payload["generationConfig"]["responseSchema"] = {
+        "type": "OBJECT",
+        "properties": {
+            "speech": {
+                "type": "STRING",
+                "description": "What the AI says back to the user. Ensure no unescaped newlines."
+            },
+            "action": {
+                "type": "STRING",
+                "description": "Action command like ADD_ITEM, REMOVE_ITEM, OPEN_MENU, CLEAR_CART, TRACK_ORDER, SHOW_HELP."
+            },
+            "parameters": {
+                "type": "OBJECT",
+                "description": "Key-value pairs for the action, e.g. {'name': 'curd', 'quantity': 1}.",
+                "properties": {
+                    "name": {
+                        "type": "STRING",
+                        "description": "The name of the item, category, or parameter."
+                    },
+                    "quantity": {
+                        "type": "INTEGER",
+                        "description": "The numerical quantity of items to add or modify."
+                    },
+                    "category": {
+                        "type": "STRING",
+                        "description": "The menu category name."
+                    },
+                    "method": {
+                        "type": "STRING",
+                        "description": "Payment method (e.g. Cash, UPI)."
+                    },
+                    "phone": {
+                        "type": "STRING",
+                        "description": "Phone number."
+                    },
+                    "fullName": {
+                        "type": "STRING",
+                        "description": "Full name of the customer."
+                    }
+                }
+            },
+            "intent": {
+                "type": "BOOLEAN",
+                "description": "True if there is an action, false otherwise."
+            }
+        },
+        "required": ["speech", "intent"]
+    }
+
     base_url = GEMINI_API_BASE.replace("v1beta2", "v1beta")
     url = f"{base_url}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     
