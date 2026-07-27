@@ -8,7 +8,7 @@ router = APIRouter()
 # Values fetched dynamically to ensure they are loaded after dotenv
 def get_gemini_config():
     api_key = os.getenv("GEMINI_API_KEY")
-    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     if model in ["gemini-1.5-pro", "gemini-2.5-pro"]:
         model = "gemini-1.5-flash"
     base_url = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")

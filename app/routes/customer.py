@@ -126,6 +126,8 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int = 1, db: Sessi
 
         return {
             "success": True,
+            "id": new_order.id,
+            "order_id": new_order.id,
             "orderId": f"ORD-{str(new_order.id).zfill(6)}",
             "dbOrderId": new_order.id,
             "message": "Order placed successfully"
@@ -186,8 +188,19 @@ def verify_payment(payload: RazorpayVerifyPayload):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/orders/{order_id}")
-def get_order_by_id(order_id: int, restaurant_id: int = 1, db: Session = Depends(get_db)):
-    order = db.query(Order).filter(Order.id == order_id, Order.restaurant_id == restaurant_id).first()
+def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+    if order_id.startswith("ORD-"):
+        try:
+            numeric_id = int(order_id.replace("ORD-", ""))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid order ID format")
+    else:
+        try:
+            numeric_id = int(order_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid order ID format")
+
+    order = db.query(Order).filter(Order.id == numeric_id, Order.restaurant_id == restaurant_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 

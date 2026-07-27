@@ -6,7 +6,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, chat
 from .mcp import router as mcp_router
 
 app = FastAPI()
@@ -44,3 +44,5 @@ app.include_router(inventory.router)
 app.include_router(restaurants.router)
 app.include_router(reports.router)
 app.include_router(mcp_router)
+app.include_router(customer.router)
+app.include_router(chat.router)

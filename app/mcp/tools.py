@@ -366,9 +366,9 @@ TOOL_REGISTRY = {
         "handler": list_restaurants,
     },
     "navigate_to_page": {
-        "description": "Navigate the user's screen to a specific page or dashboard tab. Use this whenever the user asks to go somewhere or open a specific view. If the user asks for a food category (like 'lunch', 'breakfast', 'beverages', 'starters'), map it to the 'menu' page and set the subtab to that category.",
+        "description": "Navigate the user's screen to a specific page or dashboard tab. Use this whenever the user asks to go somewhere, open a specific view, or asks where to go to add/edit something (e.g. 'where should I go to add a hotel'). Treat 'hotel' and 'restaurant' as the exact same thing. If the user asks for a food category (like 'lunch', 'breakfast', 'beverages', 'starters'), map it to the 'menu' page and set the subtab to that category.",
         "parameters": {
-            "page": "The name of the main page to navigate to (must be one of: 'menu', 'orders', 'tables', 'inventory', 'payments', 'reports', 'settings', 'dashboard').",
+            "page": "The name of the main page to navigate to (must be one of: 'menu', 'orders', 'tables', 'inventory', 'payments', 'reports', 'settings', 'dashboard', 'hotels', 'managers'). If the user asks for 'restaurants' tab or where to add/edit hotels, map it to 'hotels'.",
             "subtab": "Optional. The sub-tab/category to open. For 'orders': 'PENDING', 'PREPARING', etc. For 'menu': valid category names like 'Lunch', 'Breakfast', 'Snacks', 'Beverages', 'Starters', 'Main Course', etc."
         },
         "handler": navigate_to_page,
@@ -443,12 +443,14 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
         lines.extend([
             "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
             "If no tool is needed, set tool_name to null and provide assistant_text.",
+            "CONVERSATIONAL ADD FLOW: If the user asks to add or create something (like a hotel, manager, menu item, etc.) but doesn't provide all the necessary details required by the tool parameters, you MUST ask them conversationally for the missing details before calling the tool. Do NOT assume dummy values for required fields. For example, if they say 'add a hotel', reply with 'Sure, what is the name and address of the hotel?'."
         ])
     
     # Add role-specific context
+    lines.append("CRITICAL RULE: In this system, 'hotel' and 'restaurant' are EXACTLY the same thing. Treat them as complete synonyms. If a user says 'hotel', they mean 'restaurant' and vice versa.")
     if user.role == "SUPER_ADMIN":
-        lines.append("You are speaking with a SUPER_ADMIN who has full access to all restaurants and application features. You should assist them with any task across the entire system.")
-        lines.append("When tools allow an optional restaurant_id parameter, you can provide it to filter, or omit it to fetch data for all restaurants.")
+        lines.append("You are speaking with a SUPER_ADMIN who has full access to all hotels/restaurants and application features. You should assist them with any task across the entire system.")
+        lines.append("When tools allow an optional restaurant_id parameter, you can provide it to filter, or omit it to fetch data for all restaurants/hotels.")
     elif user.role == "HOTEL_ADMIN":
         lines.append(f"You are speaking with a HOTEL_ADMIN who exclusively manages restaurant ID {user.restaurant_id}. You must ONLY perform actions related to their specific hotel/restaurant.")
         lines.append(f"Whenever a tool requires or accepts a restaurant_id, you should assume or explicitly use restaurant ID {user.restaurant_id}.")

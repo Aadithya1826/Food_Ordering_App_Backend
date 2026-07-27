@@ -85,16 +85,16 @@ def resolve_restaurant_id(user, restaurant_id: int | None = None) -> int | None:
     if user.role == "SUPER_ADMIN":
         return restaurant_id
 
-    if user.role == "HOTEL_ADMIN":
+    if user.role in ["HOTEL_ADMIN", "CASHIER"]:
         if user.restaurant_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Hotel admin must have a restaurant assigned"
+                detail=f"{user.role} must have a restaurant assigned"
             )
         if restaurant_id is not None and restaurant_id != user.restaurant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Hotel admin can only access restaurant {user.restaurant_id}"
+                detail=f"{user.role} can only access restaurant {user.restaurant_id}"
             )
         return user.restaurant_id
 
