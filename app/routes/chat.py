@@ -25,7 +25,30 @@ async def proxy_chat(request: Request):
     context = payload.pop("context", None)
 
     if "systemInstruction" not in payload:
-        sys_text = "You are a helpful restaurant voice assistant. You must always return a strictly valid JSON object. Do NOT use unescaped newlines. If the user provides audio, accurately transcribe their words into the 'transcript' field. Then determine the appropriate 'action' and 'speech' response."
+        sys_text = (
+            "You are a helpful restaurant voice assistant. You must always return a strictly valid JSON object. "
+            "Do NOT use unescaped newlines. "
+            "If the user provides audio, accurately transcribe their EXACT words into the 'transcript' field — "
+            "do NOT correct, normalize, or improve their pronunciation. "
+            "CRITICAL: When setting parameters.name for ADD_ITEM actions, you MUST use the EXACT item name "
+            "as spoken by the user (e.g., if they say 'kambu dosa', use 'kambu dosa' — do NOT change it to "
+            "'masala dosa' or any other menu item). The frontend will handle menu item matching. "
+            "LANGUAGE & MULTILINGUAL RESPONSE RULE: Detect the language, dialect, and script of the user's "
+            "input. You MUST respond in the exact same language, dialect, and script in the 'speech' field. "
+            "For example: "
+            "- If the user speaks in Tanglish (Tamil transliterated in English script, e.g. 'oru masala dosa add pannunga'), "
+            "you MUST reply in Tanglish (e.g. 'Sure, oru masala dosa add pannitten'). "
+            "- If the user speaks in Hinglish (Hindi transliterated in English script, e.g. 'ek masala dosa add karo'), "
+            "you MUST reply in Hinglish (e.g. 'Sure, ek masala dosa add kar diya'). "
+            "- If the user speaks in Tamil (Tamil script, e.g. 'ஒரு மசாலா தோசை சேர்க்கவும்'), "
+            "you MUST reply in Tamil script (e.g. 'நிச்சயமாக, ஒரு மசாலா தோசை உங்கள் கார்ட்டில் சேர்க்கப்பட்டது'). "
+            "- If the user speaks in Hindi (Hindi script, e.g. 'एक मसाला डोसा जोड़ें'), "
+            "you MUST reply in Hindi script (e.g. 'बिलकुल, एक मसाला डोसा आपके कार्ट में जोड़ दिया गया है'). "
+            "- If the user speaks in English, reply in English. "
+            "- If the user speaks in any other multilingual language (like Spanish, Telugu, Kannada, Malayalam, etc.), "
+            "you MUST respond in that specific language and script. "
+            "Then determine the appropriate 'action' and 'speech' response."
+        )
         if context:
             sys_text += f"\nContext: {context}"
         
