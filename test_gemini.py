@@ -1,47 +1,15 @@
-import os
-import json
+import sys
 import asyncio
-from dotenv import load_dotenv
+from app.mcp.client import GeminiClient
 
-load_dotenv(r"d:\TECH WIZARD FOLDER-INTERN\Restaurant app-web\backend\.env")
-API_KEY = os.getenv("GEMINI_API_KEY")
-
-import google.generativeai as genai
-
-async def test_gemini():
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    import sys
-    sys.path.append(r"d:\TECH WIZARD FOLDER-INTERN\Restaurant app-web\backend")
-    from app.services.prompt_builder import build_voice_agent_prompt
-    
-    context = {
-        "currentPage": "/dine-in",
-        "language": "English",
-        "cart": [],
-        "tableNumber": "10",
-        "menuCategories": [],
-        "menuItems": []
-    }
-    system_prompt = build_voice_agent_prompt(context)
-    
-    contents = [{"role": "user", "parts": ["singapore noodles and veg noodles and veg chinese capsules."]}]
-    
+async def main():
+    client = GeminiClient()
+    prompt = "Reply strictly in Tamil with some local slang. Just say: 'I have checked the tables.'"
     try:
-        response = model.generate_content(
-            contents=contents,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.1,
-                candidate_count=1,
-                max_output_tokens=250,
-                response_mime_type="application/json",
-            )
-        )
-        print("Raw Gemini Response:")
-        print(response.text)
+        res = await client.generate_json(prompt, max_tokens=1500)
+        print("SUCCESS JSON", res)
     except Exception as e:
-        print("Error calling Gemini:", str(e))
+        print("FAILED JSON", e)
 
 if __name__ == "__main__":
-    asyncio.run(test_gemini())
+    asyncio.run(main())

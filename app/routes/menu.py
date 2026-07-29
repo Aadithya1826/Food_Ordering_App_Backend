@@ -80,7 +80,7 @@ def get_items(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
-    query = db.query(MenuItem)
+    query = db.query(MenuItem).filter(MenuItem.is_deleted == False)
     if restaurant_id is not None:
         query = query.filter(MenuItem.restaurant_id == restaurant_id)
 
@@ -93,7 +93,7 @@ def get_public_items(
     db: Session = Depends(get_db)
 ):
     restaurant_id = _parse_public_restaurant_id(request)
-    query = db.query(MenuItem)
+    query = db.query(MenuItem).filter(MenuItem.is_deleted == False)
     if restaurant_id is not None:
         query = query.filter(MenuItem.restaurant_id == restaurant_id)
     return query.all()
@@ -236,7 +236,7 @@ def delete_item(
             detail="Access denied"
         )
 
-    db.delete(item)
+    item.is_deleted = True
     db.commit()
     return None
 

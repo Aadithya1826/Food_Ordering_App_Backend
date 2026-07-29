@@ -227,12 +227,7 @@ def create_pos_order(
             db.add(order_item)
         db.commit()
 
-        return {
-            "orderId": new_order.id, 
-            "id": new_order.id, 
-            "order_id": new_order.id, 
-            "message": "Order created successfully"
-        }
+        return {"orderId": new_order.id, "message": "Order created successfully"}
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}

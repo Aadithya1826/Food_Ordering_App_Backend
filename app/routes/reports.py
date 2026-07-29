@@ -164,26 +164,32 @@ def get_reports(
         {"name": "Delivery", "value": delivery_count}
     ]
 
-    # Top Hotels
+    # Top Hotels & All Hotels Stats
     top_hotels_data = []
+    all_hotels_stats = {}
     if user.role == "SUPER_ADMIN" and restaurant_id is None:
-        top_hotels_query = db.query(
+        all_hotels_query = db.query(
             Order.restaurant_id, 
             func.sum(Order.total_amount).label("rev"), 
             func.count(Order.id).label("cnt")
-        ).filter(paid_condition).group_by(Order.restaurant_id).order_by(desc("rev")).limit(5).all()
+        ).filter(paid_condition).group_by(Order.restaurant_id).order_by(desc("rev")).all()
 
-        for r_id, rev, cnt in top_hotels_query:
-            r = db.query(Restaurant).filter(Restaurant.id == r_id).first()
-            if r:
-                top_hotels_data.append({
-                    "id": r.id,
-                    "name": r.name,
-                    "city": r.address or "Unknown",
-                    "revenue": rev or 0,
-                    "orders": cnt,
-                    "growth": "+12%"  # Mocked growth for UI
-                })
+        for idx, (r_id, rev, cnt) in enumerate(all_hotels_query):
+            all_hotels_stats[r_id] = {
+                "revenue": rev or 0,
+                "orders": cnt or 0
+            }
+            if idx < 5:
+                r = db.query(Restaurant).filter(Restaurant.id == r_id).first()
+                if r:
+                    top_hotels_data.append({
+                        "id": r.id,
+                        "name": r.name,
+                        "city": r.address or "Unknown",
+                        "revenue": rev or 0,
+                        "orders": cnt,
+                        "growth": "+12%"  # Mocked growth for UI
+                    })
 
     return {
         "summary": {
@@ -197,6 +203,7 @@ def get_reports(
         "payment_methods": payment_data,
         "top_items": top_items_data,
         "top_hotels": top_hotels_data,
+        "all_hotels_stats": all_hotels_stats,
         "order_breakdown": order_breakdown,
         "total_orders": total_breakdown
     }

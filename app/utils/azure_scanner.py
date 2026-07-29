@@ -1,13 +1,12 @@
 import os
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.core.credentials import AzureKeyCredential
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class AzureScanner:
     def __init__(self):
-        from azure.ai.documentintelligence import DocumentIntelligenceClient
-        from azure.core.credentials import AzureKeyCredential
-        
         self.endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
         self.key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
         

@@ -57,6 +57,10 @@ def delete_inventory_item(db: Session, user, item_id: int) -> dict:
     return {"message": f"Inventory item {item.name} deleted"}
 
 # Menu
+def list_menu_categories(db: Session, user) -> list[dict]:
+    query = filter_by_user_restaurant(user, db.query(MenuCategory))
+    return [{"id": c.id, "name": c.name} for c in query.all()]
+
 def create_menu_item(db: Session, user, name: str, price: float, category_id: int, description: str = "", is_veg: bool = True) -> dict:
     require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
     cat = db.query(MenuCategory).filter(MenuCategory.id == category_id).first()
@@ -72,7 +76,7 @@ def delete_menu_item(db: Session, user, item_id: int) -> dict:
     item = db.query(MenuItem).filter(MenuItem.id == item_id).first()
     if not item: raise HTTPException(404, "Item not found")
     require_restaurant_access(user, item.restaurant_id)
-    db.delete(item)
+    item.is_deleted = True
     db.commit()
     return {"message": f"Menu item {item.name} deleted"}
 
@@ -84,10 +88,35 @@ def get_tables(db: Session, user) -> list[dict]:
 def create_table(db: Session, user, table_number: str, capacity: int = 4) -> dict:
     require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
     restaurant_id = user.restaurant_id if user.restaurant_id else 1
+    
+    existing = db.query(Table).filter(Table.restaurant_id == restaurant_id, Table.table_number == table_number).first()
+    if existing:
+        raise HTTPException(400, f"Table number {table_number} already exists for this restaurant.")
+        
     table = Table(table_number=table_number, capacity=capacity, status="Vacant", restaurant_id=restaurant_id)
     db.add(table)
     db.commit()
     return {"message": f"Table {table_number} created", "id": table.id}
+
+def update_table(db: Session, user, table_id: int, table_number: str = None, capacity: int = None, status: str = None) -> dict:
+    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    table = db.query(Table).filter(Table.id == table_id).first()
+    if not table: raise HTTPException(404, "Table not found")
+    require_restaurant_access(user, table.restaurant_id)
+    
+    if table_number is not None and table_number != table.table_number:
+        existing = db.query(Table).filter(Table.restaurant_id == table.restaurant_id, Table.table_number == table_number).first()
+        if existing:
+            raise HTTPException(400, f"Table number {table_number} already exists.")
+        table.table_number = table_number
+        
+    if capacity is not None:
+        table.capacity = capacity
+    if status is not None:
+        table.status = status
+        
+    db.commit()
+    return {"message": f"Table {table.table_number} updated"}
 
 def delete_table(db: Session, user, table_id: int) -> dict:
     require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
@@ -229,6 +258,25 @@ def delete_manager(db: Session, user, manager_id: int) -> dict:
     db.commit()
     return {"message": f"Manager {mgr.name} deleted"}
 
+def update_manager(db: Session, user, manager_id: int, name: str = None, email: str = None, phone: str = None, password: str = None, restaurant_id: int = None) -> dict:
+    require_role(user, ["SUPER_ADMIN"])
+    mgr = db.query(User).filter(User.id == manager_id).first()
+    if not mgr: raise HTTPException(404, "Manager not found")
+    
+    if name is not None:
+        mgr.name = name
+    if email is not None:
+        mgr.email = email
+    if phone is not None:
+        mgr.phone = phone
+    if password is not None:
+        mgr.hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    if restaurant_id is not None:
+        mgr.restaurant_id = restaurant_id
+        
+    db.commit()
+    return {"message": f"Manager {mgr.name} updated"}
+
 
 EXTENDED_TOOLS = {
     "get_orders": {
@@ -286,6 +334,11 @@ EXTENDED_TOOLS = {
         },
         "handler": delete_menu_item,
     },
+    "list_menu_categories": {
+        "description": "List all menu categories and their IDs. Use this to find a category_id before moving an item.",
+        "parameters": {},
+        "handler": list_menu_categories,
+    },
     "get_tables": {
         "description": "List all tables and their statuses.",
         "parameters": {},
@@ -305,6 +358,16 @@ EXTENDED_TOOLS = {
             "table_id": "The ID of the table to delete."
         },
         "handler": delete_table,
+    },
+    "update_table": {
+        "description": "Update an existing table.",
+        "parameters": {
+            "table_id": "The ID of the table to update.",
+            "table_number": "Optional. New table identifier string (e.g. 'T-10').",
+            "capacity": "Optional. New seating capacity.",
+            "status": "Optional. New status (e.g., 'Vacant', 'Occupied')."
+        },
+        "handler": update_table,
     },
     "get_reports": {
         "description": "Get summary metrics like total revenue, paid orders, and pending orders.",
@@ -343,6 +406,18 @@ EXTENDED_TOOLS = {
             "manager_id": "ID of the manager to delete."
         },
         "handler": delete_manager,
+    },
+    "update_manager": {
+        "description": "SUPER_ADMIN ONLY. Update an existing hotel manager.",
+        "parameters": {
+            "manager_id": "ID of the manager to update.",
+            "name": "Optional. Manager's new name.",
+            "email": "Optional. Manager's new email.",
+            "phone": "Optional. Manager's new phone.",
+            "password": "Optional. Manager's new password.",
+            "restaurant_id": "Optional. ID of the new restaurant they will manage."
+        },
+        "handler": update_manager,
     },
     "create_restaurant": {
         "description": "SUPER_ADMIN ONLY. Create a new hotel/restaurant.",

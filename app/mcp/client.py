@@ -139,6 +139,10 @@ class GeminiClient:
         if txt_match:
             result["transcribed_user_text"] = txt_match.group(1)
             
+        ast_match = re.search(r'"assistant_text"\s*:\s*"([^"]+)"', trimmed)
+        if ast_match:
+            result["assistant_text"] = ast_match.group(1).replace('\\"', '"')
+            
         return result if result else None
 
     @staticmethod
