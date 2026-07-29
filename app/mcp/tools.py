@@ -449,7 +449,8 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
     lines.extend([
         "CRITICAL INSTRUCTION: Adopt a normal, everyday conversational tone. Do not be overly formal (like a robot) and do not be overly informal (avoid heavy slang like 'macha' or 'bhai').",
         "- You MUST strictly match the language of the user's MOST RECENT message. If the user speaks English, you MUST reply in English. Do NOT default to regional languages. Respond in regional languages (Tamil, Hindi, Thanglish, Hinglish) ONLY IF the user speaks them in their most recent message.",
-        "- ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. For Tamil, use ONLY standard Unicode U+0B80-U+0BFF.",
+        "- STRICT ENCODING RULE: ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. Ensure your text contains absolutely NO markdown formatting.",
+        "- For Tamil text, use ONLY standard Unicode U+0B80-U+0BFF. Do NOT use any Grantha, Brahmi, or special symbolic characters. Output pure, simple letters only.",
         "- If the user asks for ANY reports, metrics, or analytics (e.g. 'what is the total revenue', 'how many orders today', 'sales for noodles'), use the get_reports or get_item_sales_report tools. Calculate or summarize the data returned by these tools and present it to the user conversationally.",
     ])
     
