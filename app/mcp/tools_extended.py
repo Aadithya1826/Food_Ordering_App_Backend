@@ -191,6 +191,11 @@ def get_item_sales_report(db: Session, user, item_name: str | None = None, timef
     return results
 
 # Restaurants
+def get_restaurants(db: Session, user) -> list[dict]:
+    require_role(user, ["SUPER_ADMIN"])
+    restaurants = db.query(Restaurant).all()
+    return [{"id": r.id, "name": r.name, "address": r.address, "phone": r.phone} for r in restaurants]
+
 def create_restaurant(db: Session, user, name: str, address: str = None, phone: str = None) -> dict:
     require_role(user, ["SUPER_ADMIN"])
     existing = db.query(Restaurant).filter(Restaurant.name == name).first()
@@ -418,6 +423,11 @@ EXTENDED_TOOLS = {
             "restaurant_id": "Optional. ID of the new restaurant they will manage."
         },
         "handler": update_manager,
+    },
+    "get_restaurants": {
+        "description": "SUPER_ADMIN ONLY. Get a list of all hotels/restaurants and their IDs. Use this to lookup a hotel's ID if you only know its name.",
+        "parameters": {},
+        "handler": get_restaurants,
     },
     "create_restaurant": {
         "description": "SUPER_ADMIN ONLY. Create a new hotel/restaurant.",
