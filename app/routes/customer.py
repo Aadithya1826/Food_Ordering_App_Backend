@@ -90,7 +90,13 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int = 1, db: Sessi
         if is_takeaway:
             table_id = None
         else:
-            table = db.query(Table).filter(Table.table_number == payload.table_number, Table.restaurant_id == restaurant_id).first()
+            base_num = payload.table_number.replace("T-", "").replace("t-", "").strip()
+            table = db.query(Table).filter(
+                (Table.table_number == payload.table_number) |
+                (Table.table_number == base_num) |
+                (Table.table_number == f"T-{base_num}"),
+                Table.restaurant_id == restaurant_id
+            ).first()
             if not table:
                 table = Table(table_number=payload.table_number, restaurant_id=restaurant_id, capacity=4, status="Occupied")
                 db.add(table)
