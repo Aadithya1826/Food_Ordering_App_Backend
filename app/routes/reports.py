@@ -282,12 +282,22 @@ def get_hourly_report(
         starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
         ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
         
+    restaurant = None
+    if restaurant_id:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+
     return {
         "date": target_date.strftime("%d/%m/%Y"),
         "starting_bill": starting_bill,
         "ending_bill": ending_bill,
         "timeline": timeline,
-        "total_sales": total_sales
+        "total_sales": total_sales,
+        "restaurant": {
+            "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
+            "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
+            "phone": restaurant.phone if restaurant and restaurant.phone else "9597066563",
+            "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
+        }
     }
 
 @router.get("/api/v1/reports/items")
@@ -369,6 +379,10 @@ def get_item_wise_report(
         starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
         ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
         
+    restaurant = None
+    if restaurant_id:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+
     return {
         "date": target_date.strftime("%d/%m/%Y"),
         "starting_bill": starting_bill,
@@ -377,6 +391,12 @@ def get_item_wise_report(
         "total_sales": total_sales,
         "cgst": 0.00,
         "sgst": 0.00,
-        "actual_sales": total_sales
+        "actual_sales": total_sales,
+        "restaurant": {
+            "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
+            "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
+            "phone": restaurant.phone if restaurant and restaurant.phone else "9597066563",
+            "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
+        }
     }
 
