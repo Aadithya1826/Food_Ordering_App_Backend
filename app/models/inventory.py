@@ -1,6 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Date
 from ..db import Base
-from datetime import datetime
+from datetime import datetime, date
 
 class InventoryItem(Base):
     __tablename__ = "inventory_items"
@@ -14,4 +14,5 @@ class InventoryItem(Base):
     issue = Column(Float, default=0.0)
     balance = Column(Float, default=0.0)
     unit = Column(String)
+    report_date = Column(Date, default=datetime.utcnow().date)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

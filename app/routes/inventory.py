@@ -21,23 +21,33 @@ def get_db():
 @router.get("/api/v1/inventory")
 def get_inventory(
     restaurant_id: int | None = None,
+    date: str | None = None,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get inventory items with role-based access control
-
-    - SUPER_ADMIN: Sees inventory from the selected restaurant or all restaurants if no restaurant_id is provided
-    - HOTEL_ADMIN: Sees inventory only from their restaurant
     """
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
-
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
+    
     query = db.query(InventoryItem)
     if restaurant_id is not None:
         query = query.filter(InventoryItem.restaurant_id == restaurant_id)
 
-    return query.all()
+    if date == "overall":
+        # Get the latest entry for each item name
+        items = query.distinct(InventoryItem.name).order_by(InventoryItem.name, InventoryItem.report_date.desc()).all()
+        return items
+    elif date:
+        from datetime import datetime
+        try:
+            parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+            query = query.filter(InventoryItem.report_date == parsed_date)
+        except ValueError:
+            pass
+            
+    return query.order_by(InventoryItem.name).all()
 
 
 @router.patch("/api/v1/inventory/{inventory_id}")
@@ -125,6 +135,7 @@ def create_inventory(
     if not data.get("name"):
         raise HTTPException(status_code=400, detail="Name is required")
 
+    from datetime import datetime
     new_item = InventoryItem(
         restaurant_id=restaurant_id,
         name=data["name"],
@@ -133,7 +144,8 @@ def create_inventory(
         total=data.get("total", 0.0),
         issue=data.get("issue", 0.0),
         balance=data.get("balance", 0.0),
-        unit=data.get("unit", "units")
+        unit=data.get("unit", "units"),
+        report_date=datetime.strptime(data["report_date"], "%Y-%m-%d").date() if data.get("report_date") else datetime.utcnow().date()
     )
 
     db.add(new_item)
@@ -174,7 +186,7 @@ async def scan_inventory(
         return merged_items
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/api/v1/inventory/bulk")
@@ -193,6 +205,7 @@ def bulk_update_inventory(
     updated_count = 0
     created_count = 0
     
+    from datetime import datetime
     for item_data in items:
         name = item_data.get("name")
         open_stock = item_data.get("open_stock", 0.0)
@@ -202,13 +215,18 @@ def bulk_update_inventory(
         balance = item_data.get("balance", 0.0)
         unit = item_data.get("unit")
         
+        # Expect frontend to send report_date in the item payload, or default to today
+        report_date_str = item_data.get("report_date")
+        item_date = datetime.strptime(report_date_str, "%Y-%m-%d").date() if report_date_str else datetime.utcnow().date()
+        
         if not name:
             continue
             
-        # Check if item exists
+        # Check if item exists for this SPECIFIC DATE
         existing_item = db.query(InventoryItem).filter(
             InventoryItem.restaurant_id == restaurant_id,
-            InventoryItem.name.ilike(name)
+            InventoryItem.name.ilike(name),
+            InventoryItem.report_date == item_date
         ).first()
         
         if existing_item:
@@ -229,7 +247,8 @@ def bulk_update_inventory(
                 total=total,
                 issue=issue,
                 balance=balance,
-                unit=unit or "units"
+                unit=unit or "units",
+                report_date=item_date
             )
             db.add(new_item)
             created_count += 1

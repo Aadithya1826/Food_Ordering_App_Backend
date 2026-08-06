@@ -135,6 +135,20 @@ def delete_table(table_id: int, user = Depends(get_current_user), db: Session = 
         raise HTTPException(status_code=404, detail="Table not found")
 
     require_restaurant_access(user, table.restaurant_id)
+    
+    from ..models.order import Order
+    # Check if there is an active order
+    active_order = db.query(Order).filter(
+        Order.table_id == table_id,
+        Order.status.notin_(["SERVED", "COMPLETED", "CANCELLED"])
+    ).first()
+    
+    if active_order:
+        raise HTTPException(status_code=400, detail="Cannot delete a table that currently has an active order.")
+        
+    # Detach historical orders to prevent foreign key violations
+    db.query(Order).filter(Order.table_id == table_id).update({"table_id": None})
+    
     db.delete(table)
     db.commit()
 

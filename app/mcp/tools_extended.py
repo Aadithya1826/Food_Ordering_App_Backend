@@ -11,7 +11,7 @@ from ..models.restaurant import Restaurant
 from ..utils.roles import filter_by_user_restaurant, require_role, require_restaurant_access
 
 # Orders & Payments
-def get_orders(db: Session, user, status: str | None = None) -> list[dict]:
+def get_orders(db: Session, user, status: str | None = None, **kwargs) -> list[dict]:
     query = filter_by_user_restaurant(user, db.query(Order))
     if status:
         query = query.filter(Order.status == status)
@@ -34,7 +34,7 @@ def update_payment_status(db: Session, user, order_id: int, payment_status: str,
     return {"message": f"Order {order_id} payment status updated to {payment_status}"}
 
 # Inventory
-def get_inventory(db: Session, user) -> list[dict]:
+def get_inventory(db: Session, user, **kwargs) -> list[dict]:
     query = filter_by_user_restaurant(user, db.query(InventoryItem))
     return [{"id": i.id, "name": i.name, "balance": float(i.balance), "unit": i.unit} for i in query.all()]
 
@@ -57,7 +57,7 @@ def delete_inventory_item(db: Session, user, item_id: int) -> dict:
     return {"message": f"Inventory item {item.name} deleted"}
 
 # Menu
-def list_menu_categories(db: Session, user) -> list[dict]:
+def list_menu_categories(db: Session, user, **kwargs) -> list[dict]:
     query = filter_by_user_restaurant(user, db.query(MenuCategory))
     return [{"id": c.id, "name": c.name} for c in query.all()]
 
@@ -81,7 +81,7 @@ def delete_menu_item(db: Session, user, item_id: int) -> dict:
     return {"message": f"Menu item {item.name} deleted"}
 
 # Tables
-def get_tables(db: Session, user) -> list[dict]:
+def get_tables(db: Session, user, **kwargs) -> list[dict]:
     query = filter_by_user_restaurant(user, db.query(Table))
     return [{"id": t.id, "table_number": t.table_number, "status": t.status, "capacity": t.capacity} for t in query.all()]
 
@@ -130,7 +130,7 @@ def delete_table(db: Session, user, table_id: int) -> dict:
 # Reports
 from datetime import datetime, timedelta
 
-def get_reports(db: Session, user, timeframe: str = "today") -> dict:
+def get_reports(db: Session, user, timeframe: str = "today", **kwargs) -> dict:
     query = filter_by_user_restaurant(user, db.query(Order))
     
     now = datetime.utcnow()
@@ -191,7 +191,7 @@ def get_item_sales_report(db: Session, user, item_name: str | None = None, timef
     return results
 
 # Restaurants
-def get_restaurants(db: Session, user) -> list[dict]:
+def get_restaurants(db: Session, user, **kwargs) -> list[dict]:
     require_role(user, ["SUPER_ADMIN"])
     restaurants = db.query(Restaurant).all()
     return [{"id": r.id, "name": r.name, "address": r.address, "phone": r.phone} for r in restaurants]
@@ -242,18 +242,34 @@ def delete_restaurant(db: Session, user, restaurant_id: int) -> dict:
     return {"message": f"Hotel {restaurant.name} deleted"}
 
 # Managers
-def get_managers(db: Session, user) -> list[dict]:
+def get_managers(db: Session, user, **kwargs) -> list[dict]:
     require_role(user, ["SUPER_ADMIN"])
     managers = db.query(User).filter(User.role == "HOTEL_ADMIN").all()
     return [{"id": m.id, "name": m.name, "email": m.email, "restaurant_id": m.restaurant_id} for m in managers]
 
-def create_manager(db: Session, user, name: str, email: str, password: str, phone: str, restaurant_id: int) -> dict:
+def create_manager(db: Session, user, name: str, email: str = None, password: str = None, phone: str = None, restaurant_id: int = None, **kwargs) -> dict:
     require_role(user, ["SUPER_ADMIN"])
-    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    mgr = User(name=name, email=email, hashed_password=hashed, phone=phone, role="HOTEL_ADMIN", restaurant_id=restaurant_id)
+    
+    import uuid
+    # DB requires email and password_hash to not be null. Use placeholders if they aren't provided yet.
+    if not email:
+        email = f"pending_{uuid.uuid4().hex[:8]}@pending.com"
+        
+    hashed = "pending_hash"
+    if password:
+        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    mgr = User(name=name, email=email, password_hash=hashed, role="HOTEL_ADMIN", restaurant_id=restaurant_id)
+    
+    # Wait, the `User` model does not have a `phone` attribute in `backend/app/models/user.py`. 
+    # Ah, let me double check the `User` model structure. Oh, I checked it earlier, it had `name, email, password_hash, role, is_active, created_at, restaurant_id`. It did NOT have `phone`. But the old code did `phone=phone`.
+    # Wait, the previous code had `hashed_password=hashed, phone=phone` which might have crashed if `phone` doesn't exist? Or maybe the model was updated? Let me just use the original fields.
+    
+    # Let me just replace the exact lines:
+    mgr = User(name=name, email=email, password_hash=hashed, role="HOTEL_ADMIN", restaurant_id=restaurant_id)
     db.add(mgr)
     db.commit()
-    return {"message": f"Manager {name} created for restaurant {restaurant_id}"}
+    db.refresh(mgr)
+    return {"message": f"Manager {name} created for restaurant {restaurant_id}", "manager_id": mgr.id}
 
 def delete_manager(db: Session, user, manager_id: int) -> dict:
     require_role(user, ["SUPER_ADMIN"])
@@ -272,10 +288,8 @@ def update_manager(db: Session, user, manager_id: int, name: str = None, email: 
         mgr.name = name
     if email is not None:
         mgr.email = email
-    if phone is not None:
-        mgr.phone = phone
     if password is not None:
-        mgr.hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        mgr.password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     if restaurant_id is not None:
         mgr.restaurant_id = restaurant_id
         
@@ -395,13 +409,13 @@ EXTENDED_TOOLS = {
         "handler": get_managers,
     },
     "create_manager": {
-        "description": "SUPER_ADMIN ONLY. Create a new hotel manager.",
+        "description": "SUPER_ADMIN ONLY. Create a new hotel manager. You can call this immediately as soon as you have the name.",
         "parameters": {
             "name": "Manager's name.",
-            "email": "Manager's email address.",
-            "password": "Password for the new account.",
-            "phone": "Phone number.",
-            "restaurant_id": "ID of the restaurant they will manage."
+            "email": "Optional. Manager's email address.",
+            "password": "Optional. Password for the new account.",
+            "phone": "Optional. Phone number.",
+            "restaurant_id": "Optional. ID of the restaurant they will manage."
         },
         "handler": create_manager,
     },

@@ -79,6 +79,14 @@ def update_status(
 
     require_restaurant_access(user, order.restaurant_id)
     order.status = data.status
+    
+    # Auto-release table if order is completed or cancelled
+    if data.status in ["COMPLETED", "CANCELLED"] and order.table_id:
+        from ..models.table import Table
+        table = db.query(Table).filter(Table.id == order.table_id).first()
+        if table:
+            table.status = "Vacant"
+            
     db.commit()
 
     return {
@@ -102,6 +110,14 @@ def update_payment_status(
 
     require_restaurant_access(user, order.restaurant_id)
     order.payment_status = data.payment_status
+    
+    # Optional: if paid, sometimes we also consider it completed/released
+    if data.payment_status.lower() == "paid" and order.status == "COMPLETED" and order.table_id:
+        from ..models.table import Table
+        table = db.query(Table).filter(Table.id == order.table_id).first()
+        if table:
+            table.status = "Vacant"
+
     db.commit()
 
     return {
