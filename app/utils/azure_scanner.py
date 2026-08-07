@@ -44,7 +44,12 @@ class AzureScanner:
         except Exception as e:
             # If the client was initialized but fails, it means the keys/endpoint are invalid (e.g. 404, 401).
             # We raise the error rather than returning mock data so the user knows what's wrong.
-            raise ValueError(f"Azure API Error: {e}")
+            import importlib.metadata
+            try:
+                sdk_version = importlib.metadata.version('azure-ai-documentintelligence')
+            except:
+                sdk_version = 'unknown'
+            raise ValueError(f"Azure API Error (SDK: {sdk_version}, Endpoint: {self.endpoint}): {e}")
 
         items = []
         import re
