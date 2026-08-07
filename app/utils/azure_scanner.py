@@ -37,7 +37,7 @@ class AzureScanner:
         try:
             poller = self.client.begin_analyze_document(
                 "prebuilt-layout",
-                body=file_content,
+                file_content,
                 content_type="application/octet-stream"
             )
             result = poller.result()
