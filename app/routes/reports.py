@@ -229,6 +229,10 @@ def get_hourly_report(
     start_of_day = datetime(target_date.year, target_date.month, target_date.day)
     end_of_day = start_of_day + timedelta(days=1)
     
+    # Adjust for IST (UTC+5:30)
+    utc_start = start_of_day - timedelta(hours=5, minutes=30)
+    utc_end = end_of_day - timedelta(hours=5, minutes=30)
+    
     paid_condition = or_(
         func.lower(Order.payment_status) == "paid",
         and_(
@@ -238,8 +242,8 @@ def get_hourly_report(
     )
     
     q = db.query(Order).filter(
-        Order.created_at >= start_of_day,
-        Order.created_at < end_of_day,
+        Order.created_at >= utc_start,
+        Order.created_at < utc_end,
         paid_condition
     )
     if restaurant_id:
@@ -250,13 +254,11 @@ def get_hourly_report(
     timeline = []
     total_sales = 0.0
     
-    # Initialize timeline buckets from 6 AM to 11 PM (or based on actual data)
-    # We will just bucket the actual orders
-    buckets = {}
+    # Initialize timeline buckets from 12 AM to 11 PM
+    buckets = {h: 0.0 for h in range(24)}
     for o in orders:
-        hour = o.created_at.hour
-        if hour not in buckets:
-            buckets[hour] = 0.0
+        local_time = o.created_at + timedelta(hours=5, minutes=30)
+        hour = local_time.hour
         buckets[hour] += (o.total_amount or 0.0)
         total_sales += (o.total_amount or 0.0)
         
@@ -321,6 +323,10 @@ def get_item_wise_report(
     start_of_day = datetime(target_date.year, target_date.month, target_date.day)
     end_of_day = start_of_day + timedelta(days=1)
     
+    # Adjust for IST (UTC+5:30)
+    utc_start = start_of_day - timedelta(hours=5, minutes=30)
+    utc_end = end_of_day - timedelta(hours=5, minutes=30)
+    
     paid_condition = or_(
         func.lower(Order.payment_status) == "paid",
         and_(
@@ -331,8 +337,8 @@ def get_item_wise_report(
     
     # Get all orders for the day
     q = db.query(Order).filter(
-        Order.created_at >= start_of_day,
-        Order.created_at < end_of_day,
+        Order.created_at >= utc_start,
+        Order.created_at < utc_end,
         paid_condition
     )
     if restaurant_id:
