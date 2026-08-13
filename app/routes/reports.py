@@ -211,6 +211,8 @@ def get_reports(
 @router.get("/api/v1/reports/hourly")
 def get_hourly_report(
     date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     restaurant_id: int | None = None,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -218,16 +220,30 @@ def get_hourly_report(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     
-    if date:
+    if start_date and end_date:
         try:
-            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            start_target = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
+            start_of_day = datetime(start_target.year, start_target.month, start_target.day)
+            end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
+            display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
         except ValueError:
             target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
     else:
-        target_date = datetime.utcnow().date()
-        
-    start_of_day = datetime(target_date.year, target_date.month, target_date.day)
-    end_of_day = start_of_day + timedelta(days=1)
+        if date:
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = datetime.utcnow().date()
+        else:
+            target_date = datetime.utcnow().date()
+            
+        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+        end_of_day = start_of_day + timedelta(days=1)
+        display_date = target_date.strftime("%d/%m/%Y")
     
     # Adjust for IST (UTC+5:30)
     utc_start = start_of_day - timedelta(hours=5, minutes=30)
@@ -292,7 +308,7 @@ def get_hourly_report(
         restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
 
     return {
-        "date": target_date.strftime("%d/%m/%Y"),
+        "date": display_date,
         "starting_bill": starting_bill,
         "ending_bill": ending_bill,
         "timeline": timeline,
@@ -308,6 +324,8 @@ def get_hourly_report(
 @router.get("/api/v1/reports/items")
 def get_item_wise_report(
     date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     restaurant_id: int | None = None,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -315,16 +333,30 @@ def get_item_wise_report(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     
-    if date:
+    if start_date and end_date:
         try:
-            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            start_target = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
+            start_of_day = datetime(start_target.year, start_target.month, start_target.day)
+            end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
+            display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
         except ValueError:
             target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
     else:
-        target_date = datetime.utcnow().date()
-        
-    start_of_day = datetime(target_date.year, target_date.month, target_date.day)
-    end_of_day = start_of_day + timedelta(days=1)
+        if date:
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = datetime.utcnow().date()
+        else:
+            target_date = datetime.utcnow().date()
+            
+        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+        end_of_day = start_of_day + timedelta(days=1)
+        display_date = target_date.strftime("%d/%m/%Y")
     
     # Adjust for IST (UTC+5:30)
     utc_start = start_of_day - timedelta(hours=5, minutes=30)
@@ -396,7 +428,7 @@ def get_item_wise_report(
         restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
 
     return {
-        "date": target_date.strftime("%d/%m/%Y"),
+        "date": display_date,
         "starting_bill": starting_bill,
         "ending_bill": ending_bill,
         "items": items_list,
