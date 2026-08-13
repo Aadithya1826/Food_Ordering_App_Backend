@@ -230,6 +230,7 @@ def create_pos_order(
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
+            user_id=user.id,
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,

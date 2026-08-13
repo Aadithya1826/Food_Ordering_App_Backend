@@ -215,7 +215,7 @@ def get_hourly_report(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     
     if date:
@@ -248,6 +248,9 @@ def get_hourly_report(
     )
     if restaurant_id:
         q = q.filter(Order.restaurant_id == restaurant_id)
+        
+    if user.role == "CASHIER":
+        q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
     
@@ -309,7 +312,7 @@ def get_item_wise_report(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     
     if date:
@@ -343,6 +346,9 @@ def get_item_wise_report(
     )
     if restaurant_id:
         q = q.filter(Order.restaurant_id == restaurant_id)
+        
+    if user.role == "CASHIER":
+        q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
     
