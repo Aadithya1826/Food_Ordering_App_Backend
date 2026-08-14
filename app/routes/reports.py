@@ -226,7 +226,10 @@ def get_hourly_report(
             end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
             start_of_day = datetime(start_target.year, start_target.month, start_target.day)
             end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
-            display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
+            if start_target == end_target:
+                display_date = start_target.strftime('%d/%m/%Y')
+            else:
+                display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
         except ValueError:
             target_date = datetime.utcnow().date()
             start_of_day = datetime(target_date.year, target_date.month, target_date.day)
@@ -266,7 +269,7 @@ def get_hourly_report(
         q = q.filter(Order.restaurant_id == restaurant_id)
         
     if user.role == "CASHIER":
-        q = q.filter(Order.user_id == user.id)
+        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
         
     orders = q.order_by(Order.id.asc()).all()
     
@@ -339,7 +342,10 @@ def get_item_wise_report(
             end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
             start_of_day = datetime(start_target.year, start_target.month, start_target.day)
             end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
-            display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
+            if start_target == end_target:
+                display_date = start_target.strftime('%d/%m/%Y')
+            else:
+                display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
         except ValueError:
             target_date = datetime.utcnow().date()
             start_of_day = datetime(target_date.year, target_date.month, target_date.day)
@@ -380,7 +386,7 @@ def get_item_wise_report(
         q = q.filter(Order.restaurant_id == restaurant_id)
         
     if user.role == "CASHIER":
-        q = q.filter(Order.user_id == user.id)
+        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
         
     orders = q.order_by(Order.id.asc()).all()
     
