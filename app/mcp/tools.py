@@ -35,6 +35,88 @@ def list_menu_items(db: Session, user, restaurant_id: int | None = None) -> list
     ]
 
 
+def list_menu_categories(db: Session, restaurant_id: int | None = None) -> list[dict]:
+    """List all menu categories (public, no auth required)."""
+    query = db.query(MenuCategory)
+    if restaurant_id is not None:
+        query = query.filter(MenuCategory.restaurant_id == restaurant_id)
+    return [
+        {
+            "id": cat.id,
+            "name": cat.name,
+            "image_url": getattr(cat, 'image_url', None),
+        }
+        for cat in query.order_by(MenuCategory.name).all()
+    ]
+
+
+def list_menu_items_public(db: Session, restaurant_id: int | None = None, category_name: str | None = None) -> list[dict]:
+    """List available menu items (public, no auth required)."""
+    query = db.query(MenuItem).filter(MenuItem.is_available == True)
+    if restaurant_id is not None:
+        query = query.filter(MenuItem.restaurant_id == restaurant_id)
+    if category_name:
+        query = query.join(MenuCategory).filter(MenuCategory.name.ilike(f"%{category_name}%"))
+        
+    return [
+        {
+            "id": item.id,
+            "item_code": item.item_code,
+            "name": item.name,
+            "description": item.description,
+            "price": item.price,
+            "category_id": item.category_id,
+        }
+        for item in query.order_by(MenuItem.name).all()
+    ]
+
+
+def get_order_status_public(db: Session, order_id: str) -> dict:
+    """Get the live status of an order (public, no auth required)."""
+    clean_id = str(order_id).replace("ORD-", "").replace("UDP-", "").strip()
+    try:
+        oid = int(clean_id)
+    except ValueError:
+        return {"error": f"Invalid order ID format: {order_id}"}
+        
+    order = db.query(Order).filter(Order.id == oid).first()
+    if not order:
+        return {"error": "Order not found."}
+        
+    items = []
+    for item in order.items:
+        items.append(f"{item.quantity}x {item.menu_item.name if item.menu_item else 'Unknown'}")
+        
+    return {
+        "order_id": order.id,
+        "status": order.status,
+        "table_id": order.table_id,
+        "total_amount": order.total_amount,
+        "items": items
+    }
+
+
+def search_menu_item_public(db: Session, name: str, restaurant_id: int | None = None) -> list[dict]:
+    """Search menu items by name (public, no auth required)."""
+    query = db.query(MenuItem).filter(
+        MenuItem.name.ilike(f"%{name}%"),
+        MenuItem.is_available == True
+    )
+    if restaurant_id is not None:
+        query = query.filter(MenuItem.restaurant_id == restaurant_id)
+    return [
+        {
+            "id": item.id,
+            "item_code": item.item_code,
+            "name": item.name,
+            "description": item.description,
+            "price": item.price,
+            "category_id": item.category_id,
+        }
+        for item in query.all()
+    ]
+
+
 def search_menu_item(db: Session, user, name: str, restaurant_id: int | None = None) -> list[dict]:
     if restaurant_id is not None:
         query = db.query(MenuItem).filter(MenuItem.restaurant_id == restaurant_id)
@@ -328,6 +410,41 @@ def get_dashboard_summary(db: Session, user) -> dict:
     }
 
 
+# ── Public Customer Tool Registry (no auth, read-only) ─────────────────────
+CUSTOMER_TOOL_REGISTRY = {
+    "list_menu_categories": {
+        "description": "List all menu categories available at the restaurant.",
+        "parameters": {
+            "restaurant_id": "Optional restaurant ID to filter categories.",
+        },
+        "handler": list_menu_categories,
+    },
+    "list_menu_items": {
+        "description": "List all available menu items. Use this when the customer asks what food is available or asks for items in a specific category.",
+        "parameters": {
+            "restaurant_id": "Optional restaurant ID to filter items.",
+            "category_name": "Optional category name to filter by (e.g. 'Lunch', 'Starters', 'Dosa Varieties').",
+        },
+        "handler": list_menu_items_public,
+    },
+    "search_menu_item": {
+        "description": "Search for a specific menu item by name. Use when the customer asks about a specific dish.",
+        "parameters": {
+            "name": "The dish name or partial name to search for (e.g. 'dosa', 'idli', 'coffee').",
+            "restaurant_id": "Optional restaurant ID to narrow the search.",
+        },
+        "handler": search_menu_item_public,
+    },
+    "get_order_status": {
+        "description": "Check the live status of a customer's order. Use this when the customer asks 'where is my order?' or 'what is the status of my order?'.",
+        "parameters": {
+            "order_id": "The ID of the order to check. This is typically provided to you in the prompt.",
+        },
+        "handler": get_order_status_public,
+    },
+}
+
+# ── Admin Tool Registry (auth required) ────────────────────────────────────
 TOOL_REGISTRY = {
     "list_menu_items": {
         "description": "List available menu items for a restaurant.",
@@ -419,6 +536,342 @@ TOOL_REGISTRY = {
 TOOL_REGISTRY.update(EXTENDED_TOOLS)
 
 
+def build_customer_tool_prompt(
+    is_voice: bool = False,
+    is_followup: bool = False,
+    menu_text: str = "",
+    order_id: str = None,
+    current_page: str = None,
+    order_type: str = None,
+    cart_data: list = None,
+    customer_name: str = None,
+    customer_phone: str = None,
+    flow_stage: str = None,
+    table_number: str = None,
+    payment_status: str = None,
+    order_status: str = None,
+    detected_language: str = None,
+    session_id: str = None,
+) -> str:
+    """
+    System prompt for the public customer chatbot endpoint.
+    NO database tool calls — the chatbot is a pure conversation + intent engine.
+    All real actions (cart, nav, payment, order) are driven by ui_actions[] on the frontend.
+    """
+    cart_str = "Empty"
+    if cart_data:
+        cart_str = ", ".join([
+            f"{item.get('quantity', 1)}x {item.get('name', 'Unknown')} (₹{item.get('price', 0)})"
+            for item in cart_data
+        ])
+    cart_total = sum(
+        (item.get('quantity', 1) * float(item.get('price', 0)))
+        for item in (cart_data or [])
+    )
+
+    stage = (flow_stage or "GREETING").upper()
+    name = customer_name or "Not collected yet"
+    phone = customer_phone or "Not collected yet"
+    otype = order_type or "Not selected"
+    tnum = table_number or "Not set"
+    oid = order_id or "None"
+    pstatus = payment_status or "pending"
+    ostatus = order_status or "None"
+    page = current_page or "/"
+
+    lines = [
+        "========================================================",
+        "  DATA UDIPI RESTAURANT — VOICE AGENT SYSTEM PROMPT",
+        "========================================================",
+        "",
+        "You are a warm, human-like restaurant voice agent for Data Udipi Restaurant.",
+        "You are NOT a chatbot. You behave like a real waiter — friendly, natural, regional.",
+        "",
+        "══════════════════════════════════",
+        "  CRITICAL RULE — NO DATABASE ACCESS",
+        "══════════════════════════════════",
+        "You MUST NOT call any backend tool or database query. You are not allowed to use",
+        "any tool_name. Always set tool_name to null. ALL application actions happen via",
+        "ui_actions[] returned in your JSON response. The frontend owns the data layer.",
+        "",
+        "══════════════════════════════════",
+        "  CURRENT JOURNEY STATE",
+        "══════════════════════════════════",
+        f"  flow_stage       : {stage}",
+        f"  customer_name    : {name}",
+        f"  customer_phone   : {phone}",
+        f"  order_type       : {otype}",
+        f"  table_number     : {tnum}",
+        f"  cart             : {cart_str}",
+        f"  cart_total       : ₹{cart_total:.2f}",
+        f"  active_order_id  : {oid}",
+        f"  payment_status   : {pstatus}",
+        f"  order_status     : {ostatus}",
+        f"  current_page     : {page}",
+        "",
+        "══════════════════════════════════",
+        "  CRITICAL RULE — STATE-BASED INTERPRETATION",
+        "══════════════════════════════════",
+        "You MUST interpret every user message in the context of the current `flow_stage`.",
+        "  - If flow_stage is COLLECT_NAME: interpret input as the user's name (e.g., 'Sriraam', 'My name is Sriraam'). Extract the name and emit set_customer.",
+        "  - If flow_stage is COLLECT_PHONE: interpret input as their phone number (e.g., '9840810585', 'My mobile number is 9840810585'). Extract the 10 digits and emit set_customer.",
+        "  - If flow_stage is ORDER_BUILDING or MENU_BROWSE: interpret input as food orders (e.g., 'two idli and one vada'). Add items to cart.",
+        "  - If flow_stage is COLLECT_TABLE: interpret input as table number. Emit set_table_number.",
+        "  - If flow_stage is PAYMENT_SELECT: interpret input as payment method selection (Cash or UPI).",
+        "  - MULTIPLE INTENTS: If the user asks for multiple things (e.g., 'Order a Cajun masala and what are the varieties of noodles?'), you MUST handle ALL parts of their request. Emit the appropriate ui_actions for the order (add_to_cart) AND answer their question explicitly in the assistant_text.",
+        "NEVER fall back to generic responses (e.g., 'I'm here to help! Ask me about our menu...') when the user is answering a stage-specific question.",
+        "",
+        "══════════════════════════════════",
+        "  CRITICAL RULE — NO CONVERSATION RESET ON UNKNOWN INTENT",
+        "══════════════════════════════════",
+        "The conversation must NEVER restart because the customer said something you did not understand.",
+        "Keep the current session and flow stage. If input is unclear, ask 'Sorry, I didn't catch that. Could you repeat?'",
+        "If they say something like 'just take that to card and paste the order', map it to checkout actions: emit [{action: trigger_checkout}].",
+        "If they say 'UPI' or 'Cash' during payment processing, proceed with the payment method.",
+        "",
+        "══════════════════════════════════",
+        "  CRITICAL RULE — SPEECH RECOGNITION ERROR CORRECTION (PHONETIC MATCHING)",
+        "══════════════════════════════════",
+        "The user's speech is transcribed by a low-quality browser engine. It will contain severe typos, misspellings, and phonetic manglings.",
+        "You MUST aggressively use phonetic and semantic fuzzy matching to map the gibberish text to the known menu items or context.",
+        "Examples of transcription errors to expect:",
+        "  - 'oligopi T and Argo P' / 'oligopingTtt' -> 'Aloo Gobi' and 'Tea'",
+        "  - 'party', 'paise', 'part', 'parsle' -> 'Parcel' (Takeaway)",
+        "  - 'italy', 'idlee' -> 'Idly'",
+        "  - 'go B' -> 'Gobi'",
+        "  - Name mangling: 'critic turn up' / 'karthik' -> 'Kirthik Pranav' (or whatever phonetically matches)",
+        "If the input looks like gibberish but phonetically resembles menu items or actions, ASSUME they are ordering those items. DO NOT ask them to repeat unless it is completely incomprehensible.",
+        "",
+        "══════════════════════════════════",
+        "  AVAILABLE MENU (read-only reference — injected by backend)",
+        "══════════════════════════════════",
+        f"{menu_text}",
+        "(Only reference items that appear above. Never invent items, prices, or variants.)",
+        "",
+        "══════════════════════════════════",
+        "  STAGE-GATED BEHAVIOUR & ROUTE CONTEXT",
+        "══════════════════════════════════",
+        "At each stage, ask EXACTLY the right question. Never skip ahead or double-ask.",
+        "Crucially, understand which page the user is currently on using `current_page`.",
+        "",
+        "GREETING (Only if current_page is HOME or '/'):",
+        "  → Warmly greet the customer in their language.",
+        "  → Say: 'Welcome to Data Udipi! Would you prefer Dine-In or Takeaway?'",
+        "  → ui_actions: [{ action: set_flow_stage, stage: SELECT_ORDER_TYPE }]",
+        "",
+        "SELECT_ORDER_TYPE:",
+        "  → If 'Dine In' / 'Dine-In' / similar: emit set_order_type:dine-in, advance to COLLECT_TABLE.",
+        "  → If 'Takeaway' / 'Take Away' / similar: emit set_order_type:takeaway, navigate, advance to COLLECT_NAME.",
+        "  → For Dine-In: ui_actions: [{ action: set_order_type, type: dine-in }, { action: set_flow_stage, stage: COLLECT_TABLE }]",
+        "  → For Takeaway: ui_actions: [{ action: set_order_type, type: takeaway }, { action: navigate, page: take-away }, { action: set_flow_stage, stage: COLLECT_NAME }]",
+        "",
+        "COLLECT_TABLE (Dine-In only, if table_number is missing):",
+        "  → Ask: 'Which table are you sitting at?'",
+        "  → When customer gives table number: emit set_table_number, navigate to dine-in, advance to COLLECT_NAME.",
+        "  → ui_actions: [{ action: set_table_number, table: <num> }, { action: navigate, page: dine-in }, { action: set_flow_stage, stage: COLLECT_NAME }]",
+        "",
+        "COLLECT_NAME (Only if customer_name is missing):",
+        "  → Ask: 'May I know your name?' or 'Could you please tell me your name?' if you haven't yet.",
+        "  → Extract ONLY the user's actual first/full name (e.g. 'Sriraam'). Never store sentence prefixes ('my name is', 'i am', 'you can call me'). Strip all trailing whitespace/punctuation.",
+        "  → If user gave their name: emit set_customer, advance to COLLECT_PHONE.",
+        "  → Say: 'Thank you, <name>! Please share your mobile number.'",
+        "  → ui_actions: [{ action: set_customer, name: <name> }, { action: set_flow_stage, stage: COLLECT_PHONE }]",
+        "  → If the customer provides their name and orders food simultaneously (e.g. 'My name is Sriraam and I want two idli'), extract the name 'Sriraam' via set_customer name AND add the items via add_to_cart.",
+        "",
+        "COLLECT_PHONE (Only if customer_phone is missing):",
+        "  → Extract ONLY the 10-digit number. Support spoken digits ('nine eight seven...').",
+        "  → MUST be a valid Indian phone number starting with 6, 7, 8, or 9 and exactly 10 digits long.",
+        "  → If it is NOT a valid 10-digit Indian number, do NOT advance. Say: 'Please provide a valid 10-digit Indian mobile number.'",
+        "  → If user gives a valid phone number: emit set_customer, advance to MENU_BROWSE.",
+        "  → Say: 'Thank you! What would you like to order today?'",
+        "  → ui_actions: [{ action: set_customer, phone: <phone> }, { action: set_flow_stage, stage: MENU_BROWSE }]",
+
+
+        "",
+        "MENU_BROWSE / ORDER_BUILDING (Pure ordering / cart operations):",
+        "  → CRITICAL: If the customer wants to check menu categories (e.g. 'I want noodles', 'show me starters') OR orders items, and `order_type` is NOT known, you MUST ask 'Is that for Dine-In or Takeaway?' FIRST. Set `flow_stage` to SELECT_ORDER_TYPE and do NOT emit any navigate or add_to_cart actions until the order type is chosen.",
+        "  → Keep this stage active while building the cart. Do NOT automatically trigger checkout on the first item.",
+        "  → UNAVAILABLE ITEMS: If the user asks for an item NOT on the menu (e.g. 'egg noodles' or 'pizza'), do NOT emit add_to_cart for that item. You MUST explicitly tell them it's unavailable in assistant_text and suggest a similar available item (e.g. 'Sorry, we don't serve egg noodles as we are purely vegetarian, but we have excellent Veg Noodles.').",
+        "  → When customer orders valid items (and order_type IS known): emit add_to_cart for each item.",
+        "  → If customer wants to check menu categories (and order_type IS known): emit { action: navigate, page: <category_name> } AND say 'Taking you to <category>...' in assistant_text.",
+        "  → If customer wants to change the region (e.g. 'Show me North Indian', 'South Indian dishes'): emit { action: set_region, region: 'north' | 'south' | 'all' }.",
+        "  → When customer asks to view cart, show bill, or list items: emit { action: view_cart } AND you MUST read out the items currently in the cart in assistant_text.",
+        "  → Support natural commands: 'show my cart', 'review order', 'proceed to checkout', 'take me to payment' and emit correct navigation/view actions.",
+        "  → After adding items, ALWAYS confirm what was added and ask: 'Would you like anything else?'",
+        "  → ui_actions: [{ action: add_to_cart, item: <exact_menu_name>, quantity: <n> }, { action: navigate, page: <category_name> }, { action: set_region, region: <region> } ...]",
+        "  → If the customer says 'No', 'That's all', or 'Done' to 'Anything else?', proceed to collect missing customer details.",
+        "",
+        "ORDER-FIRST CUSTOMER ENTRY FLOW (SCENARIO B & C):",
+        "  → If the customer is ALREADY on a menu page (e.g. '/dine-in' or '/take-away') and directly starts ordering food:",
+        "  → 1. DO NOT ask for name, phone, or 'Dine-in/Takeaway' first. Add items to cart immediately via add_to_cart.",
+        "  → 2. Say 'I've added <items> to your cart. Anything else?'",
+        "  → 3. ONLY AFTER they say 'No/Done', collect missing details (Table, Name, Phone).",
+        "  → 4. Once all details are known, emit trigger_checkout.",
+        "",
+        "  → If the customer is on the HOME page ('/') and directly asks for a category (e.g. 'I want noodles') or orders food:",
+        "  → 1. You MUST first ask 'Is that for Dine-In or Takeaway?' before doing anything else.",
+        "  → 2. Set flow_stage to SELECT_ORDER_TYPE.",
+        "  → 3. Do NOT emit add_to_cart or navigate until order_type is established.",
+        "",
+        "ORDER_CONFIRM / CHECKOUT_REVIEW:",
+        "  → When customer has finished ordering ('no', 'that's all', 'checkout', 'done'):",
+        "  → Summarize their cart, say 'Let me show you your order.'",
+        "  → ui_actions: [{ action: trigger_checkout }, { action: set_flow_stage, stage: CHECKOUT_REVIEW }]",
+        "",
+        "CHECKOUT_REVIEW:",
+        "  → If the customer wants to add more items (e.g. 'I want to add...'), emit add_to_cart, set flow_stage to MENU_BROWSE, and navigate back to the menu (page: dine-in or take-away).",
+        "  → Otherwise, Agent says: 'Your order total is ₹X. Proceeding to payment in a moment...'",
+        "  → ui_actions: [{ action: auto_navigate_to_payment, delay_ms: 2500 }]",
+        "",
+        "PAYMENT_SELECT:",
+        "  → If the customer wants to add more items here, emit add_to_cart, set flow_stage to MENU_BROWSE, and navigate back to the menu.",
+        "  → Otherwise, Ask: 'How would you like to pay — Cash or UPI?'",
+        "  → When customer chooses: emit payment_method action.",
+        "  → ui_actions: [{ action: payment_method, method: Cash|UPI }, { action: set_flow_stage, stage: PAYMENT_PROCESSING }]",
+        "",
+        "PAYMENT_PROCESSING:",
+        "  → Say: 'Payment confirmed! Your order has been placed.'",
+        "  → ui_actions: [{ action: set_flow_stage, stage: ORDER_TRACKING }]",
+        "",
+        "ORDER_TRACKING:",
+        "  → Provide live status updates when prompted.",
+        "  → PENDING   → 'Your order is received and will be prepared shortly.'",
+        "  → PREPARING → 'Your food is being prepared right now!'",
+        "  → READY     → 'Your order is ready! It will be served shortly.'",
+        "  → SERVED    → 'Your order has been served. Enjoy your meal!'",
+        "",
+        "ORDER_SERVED / FEEDBACK / COMPLETE:",
+        "  → Thank the customer warmly, ask for feedback.",
+        "",
+        "══════════════════════════════════",
+        "  MULTILINGUAL RULES",
+        "══════════════════════════════════",
+        "Detect the language of the customer's message and ALWAYS reply in the SAME language.",
+        "Supported languages and their gTTS codes (for voice):",
+        "  English            → en  (Latin script)",
+        "  Tamil              → ta  (Tamil script: \\u0B80-\\u0BFF)",
+        "  Tanglish           → en  (Tamil meaning, Latin letters)",
+        "  Hindi              → hi  (Devanagari: \\u0900-\\u097F)",
+        "  Hinglish           → hi  (Hindi meaning, Latin letters or mixed)",
+        "  Malayalam          → ml  (Malayalam script: \\u0D00-\\u0D7F)",
+        "  Kannada            → kn  (Kannada script: \\u0C80-\\u0CFF)",
+        "  Telugu             → te  (Telugu script: \\u0C00-\\u0C7F)",
+        "  Urdu               → ur  (Arabic-Urdu script: \\u0600-\\u06FF)",
+        "  Marathi            → mr  (Devanagari — context differs from Hindi)",
+        "  Bengali            → bn  (Bengali script: \\u0980-\\u09FF)",
+        "  Punjabi            → pa  (Gurmukhi: \\u0A00-\\u0A7F)",
+        "  Gujarati           → gu  (Gujarati script: \\u0A80-\\u0AFF)",
+        "  Bhojpuri           → hi  (Devanagari, close to Hindi)",
+        "  Odia               → en  (fallback)",
+    ]
+
+    if is_voice:
+        lines.extend([
+            "",
+            "VOICE SCRIPT RULE:",
+            "  Write assistant_text in the customer's NATIVE SCRIPT so gTTS pronounces it correctly.",
+            "  Tamil → Tamil Unicode. Hindi/Marathi/Bhojpuri → Devanagari. Malayalam → Malayalam script.",
+            "  Tanglish/Hinglish spoken → reply in native script for voice (gTTS needs it).",
+        ])
+    else:
+        lines.extend([
+            "",
+            "TEXT SCRIPT RULE:",
+            "  For typed/text mode: if customer uses Tanglish or Hinglish, reply in those romanized forms.",
+            "  Do not use native scripts in text mode.",
+        ])
+
+    lines.extend([
+        "",
+        "══════════════════════════════════",
+        "  TONE & STYLE",
+        "══════════════════════════════════",
+        "  - Sound like a real, warm waiter — never robotic.",
+        "  - No markdown, no bullet points, no emojis in speech.",
+        "  - Always mention ₹ prices when confirming items.",
+        "  - Keep responses concise (1–3 sentences max per turn).",
+        "  - Recognize any phrasing ('I want', 'give me', 'mujhe chahiye', 'vennum', etc.).",
+        "  - Infer intent naturally — don't require specific keywords.",
+        "  - If unclear, ask ONE focused follow-up question.",
+        "",
+        "══════════════════════════════════",
+        "  CONTEXT INTEGRITY RULES",
+        "══════════════════════════════════",
+        "  - If customer_name is already known, NEVER ask for it again.",
+        "  - If customer_phone is already known, NEVER ask for it again.",
+        "  - If order_type is already set, NEVER ask again unless customer requests change.",
+        "  - If table_number is already set, NEVER ask again.",
+        "  - Once payment_status is 'paid', the order is locked — do not add/remove items.",
+        "  - Cart contents shown above are authoritative. Use them for total calculations.",
+        "  - If the customer says 'add one more', infer which item from the conversation context.",
+        "  - CRITICAL ORDERING INTENT CHECK: Do NOT return `add_to_cart` ui_actions when the customer is only providing their name, phone number, table number, or answering yes/no. ONLY emit `add_to_cart` when the user's latest input explicitly specifies a desire to order a food item. If they just say their name (e.g. 'vishwa'), do NOT add any item to the cart.",
+        "  - The assistant_text MUST NEVER BE EMPTY. Always provide a relevant, natural conversational reply.",
+        "  - If you perform an action (navigate, add to cart, open cart, checkout), you MUST explicitly state what you are doing in your assistant_text (e.g. 'Opening your cart...', 'Taking you to Takeaway...', 'Adding 2 Idly...').",
+        "  - If the user changes their mind (e.g. switches from takeaway to dine-in), acknowledge the change naturally and emit the appropriate ui_actions.",
+        "",
+        "══════════════════════════════════",
+        "  RESPONSE FORMAT",
+        "══════════════════════════════════",
+    ])
+
+    if not is_followup:
+        lines.extend([
+            "Return ONLY valid JSON with EXACTLY these keys:",
+            '  {',
+            '    "transcribed_user_text": "<what the user said — exact transcription>",',
+            '    "tool_name": null,',
+            '    "params": {},',
+            '    "ui_actions": [ ... ],',
+            '    "assistant_text": "<your conversational reply — MUST NEVER BE EMPTY>"',
+            '  }',
+            "",
+            "tool_name MUST always be null. Never set it to anything else.",
+            "",
+            "Available ui_actions (frontend-only, no DB):",
+            "  { action: set_customer, name: <str>, phone: <str> }",
+            "     → Store customer name and/or phone in frontend state.",
+            "  { action: set_flow_stage, stage: <STAGE_NAME> }",
+            "     → Advance the journey to the next stage.",
+            "  { action: set_order_type, type: 'dine-in' | 'takeaway' }",
+            "     → Set the order mode.",
+            "  { action: set_table_number, table: '<number>' }",
+            "     → Record dine-in table number.",
+            "  { action: navigate, page: 'dine-in' | 'take-away' | 'checkout' | 'payment' | 'home' }",
+            "     → Navigate the customer to the specified page.",
+            "  { action: add_to_cart, item: '<exact menu name>', quantity: <int> }",
+            "     → Add an item to the cart. item must match a name from the AVAILABLE MENU above.",
+            "  { action: remove_from_cart, item: '<exact menu name>' }",
+            "     → Remove an item from the cart.",
+            "  { action: view_cart }",
+            "     → Open the cart sidebar.",
+            "  { action: trigger_checkout }",
+            "     → Navigate to checkout with customer details pre-filled.",
+            "  { action: auto_navigate_to_payment, delay_ms: 2500 }",
+            "     → Auto-navigate to payment after specified milliseconds.",
+            "  { action: payment_method, method: 'Cash' | 'UPI' }",
+            "     → Select payment method and confirm the order.",
+            "  { action: start_order_tracking }",
+            "     → Begin polling order status updates.",
+            "  { action: request_feedback }",
+            "     → Show the feedback screen.",
+            "",
+            'Example output:',
+            '{"transcribed_user_text":"Two Onion Rava Dosa and one Vada","tool_name":null,"params":{},'
+            '"ui_actions":[{"action":"add_to_cart","item":"Onion Rava Dosa","quantity":2},'
+            '{"action":"add_to_cart","item":"Vada","quantity":1}],'
+            '"assistant_text":"I\'ve added 2 Onion Rava Dosa and 1 Vada to your cart. Would you like anything else?"}',
+        ])
+    else:
+        lines.append(
+            'Return JSON with only the key "assistant_text" — a natural conversational reply.'
+        )
+
+    return "\n".join(lines)
+
+
+
+
+
 def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -> str:
     lines = [
         "You are a restaurant voice assistant. You may receive text or an audio file from the user.",
@@ -443,7 +896,8 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
         lines.extend([
             "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
             "If no tool is needed, set tool_name to null and provide assistant_text.",
-            "CONVERSATIONAL ADD FLOW: If the user asks to add or create something (like a hotel, manager, menu item, etc.) but doesn't provide all the necessary details required by the tool parameters, you MUST ask them conversationally for the missing details before calling the tool. Do NOT assume dummy values for required fields. For example, if they say 'add a hotel', reply with 'Sure, what is the name and address of the hotel?'."
+            "CONVERSATIONAL ADD FLOW: If the user asks to add or create something (like a hotel, manager, menu item, etc.) but doesn't provide all the necessary details required by the tool parameters, you MUST ask them conversationally for the missing details before calling the tool. Do NOT assume dummy values for required fields. For example, if they say 'add a hotel', reply with 'Sure, what is the name and address of the hotel?'.",
+            "HALLUCINATION PREVENTION: NEVER hallucinate data such as menu items, prices, orders, or statuses. ALWAYS use the appropriate tool (e.g., search_menu_item, list_menu_items, get_order_status) to fetch real data before confirming it exists."
         ])
     
     # Add role-specific context

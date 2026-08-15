@@ -514,11 +514,13 @@ Examples:
 "Add one ghee roast" -> {{ "type": "ADD_ITEM", "parameters": {{ "name": "Ghee Roast Dosa", "quantity": 1 }} }}
 "Increase coffee" -> UPDATE_QUANTITY
 "I'm done", "Proceed", "Next", "Continue", "go checkout" -> CHECKOUT_NOW
+CRITICAL RULE: When the user says they are done or want to checkout, your speech MUST ask for their name and phone number. Example: "Great! Let's head to checkout. What is your name and phone number?"
 
 =========================
 PAGE : CHECKOUT
 =========================
 Purpose: Customer reviews cart and enters details.
+CRITICAL RULE: Before allowing PROCEED_TO_PAYMENT, you MUST ask the customer for their name and phone number if they haven't provided them yet.
 Allowed Actions: ADD_ITEM, REMOVE_ITEM, UPDATE_QUANTITY, CLEAR_CART, PROCEED_TO_PAYMENT, GO_HOME, UPDATE_NAME, UPDATE_PHONE
 Examples:
 "Remove dosa" -> REMOVE_ITEM

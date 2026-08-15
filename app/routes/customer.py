@@ -218,6 +218,20 @@ def get_public_active_order_for_table(table_number: str, restaurant_id: int = 1,
         "payment_status": order.payment_status
     }
 
+@router.get("/api/v1/public/tables/{table_number}")
+def get_public_table_status(table_number: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+    clean_table = table_number.strip()
+    table = db.query(Table).filter(Table.table_number.ilike(f"%{clean_table}%"), Table.restaurant_id == restaurant_id).first()
+    
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+        
+    return {
+        "table_number": table.table_number,
+        "is_active": getattr(table, "is_active", True),
+        "status": getattr(table, "status", "Vacant") or "Vacant"
+    }
+
 @router.get("/api/orders/{order_id}")
 def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
     clean_id = order_id.replace("ORD-", "").replace("UDP-", "").strip()
