@@ -164,26 +164,32 @@ def get_reports(
         {"name": "Delivery", "value": delivery_count}
     ]
 
-    # Top Hotels
+    # Top Hotels & All Hotels Stats
     top_hotels_data = []
+    all_hotels_stats = {}
     if user.role == "SUPER_ADMIN" and restaurant_id is None:
-        top_hotels_query = db.query(
+        all_hotels_query = db.query(
             Order.restaurant_id, 
             func.sum(Order.total_amount).label("rev"), 
             func.count(Order.id).label("cnt")
-        ).filter(paid_condition).group_by(Order.restaurant_id).order_by(desc("rev")).limit(5).all()
+        ).filter(paid_condition).group_by(Order.restaurant_id).order_by(desc("rev")).all()
 
-        for r_id, rev, cnt in top_hotels_query:
-            r = db.query(Restaurant).filter(Restaurant.id == r_id).first()
-            if r:
-                top_hotels_data.append({
-                    "id": r.id,
-                    "name": r.name,
-                    "city": r.address or "Unknown",
-                    "revenue": rev or 0,
-                    "orders": cnt,
-                    "growth": "+12%"  # Mocked growth for UI
-                })
+        for idx, (r_id, rev, cnt) in enumerate(all_hotels_query):
+            all_hotels_stats[r_id] = {
+                "revenue": rev or 0,
+                "orders": cnt or 0
+            }
+            if idx < 5:
+                r = db.query(Restaurant).filter(Restaurant.id == r_id).first()
+                if r:
+                    top_hotels_data.append({
+                        "id": r.id,
+                        "name": r.name,
+                        "city": r.address or "Unknown",
+                        "revenue": rev or 0,
+                        "orders": cnt,
+                        "growth": "+12%"  # Mocked growth for UI
+                    })
 
     return {
         "summary": {
@@ -197,6 +203,250 @@ def get_reports(
         "payment_methods": payment_data,
         "top_items": top_items_data,
         "top_hotels": top_hotels_data,
+        "all_hotels_stats": all_hotels_stats,
         "order_breakdown": order_breakdown,
         "total_orders": total_breakdown
     }
+
+@router.get("/api/v1/reports/hourly")
+def get_hourly_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+    restaurant_id = resolve_restaurant_id(user, restaurant_id)
+    
+    if start_date and end_date:
+        try:
+            start_target = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
+            start_of_day = datetime(start_target.year, start_target.month, start_target.day)
+            end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
+            if start_target == end_target:
+                display_date = start_target.strftime('%d/%m/%Y')
+            else:
+                display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
+        except ValueError:
+            target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
+    else:
+        if date:
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = datetime.utcnow().date()
+        else:
+            target_date = datetime.utcnow().date()
+            
+        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+        end_of_day = start_of_day + timedelta(days=1)
+        display_date = target_date.strftime("%d/%m/%Y")
+    
+    # Adjust for IST (UTC+5:30)
+    utc_start = start_of_day - timedelta(hours=5, minutes=30)
+    utc_end = end_of_day - timedelta(hours=5, minutes=30)
+    
+    paid_condition = or_(
+        func.lower(Order.payment_status) == "paid",
+        and_(
+            or_(Order.payment_status.is_(None), Order.payment_status == ""),
+            Order.status.in_(["SERVED", "COMPLETED"])
+        )
+    )
+    
+    q = db.query(Order).filter(
+        Order.created_at >= utc_start,
+        Order.created_at < utc_end,
+        paid_condition
+    )
+    if restaurant_id:
+        q = q.filter(Order.restaurant_id == restaurant_id)
+        
+    if user.role == "CASHIER":
+        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
+        
+    orders = q.order_by(Order.id.asc()).all()
+    
+    timeline = []
+    total_sales = 0.0
+    
+    # Initialize timeline buckets from 12 AM to 11 PM
+    buckets = {h: 0.0 for h in range(24)}
+    for o in orders:
+        local_time = o.created_at + timedelta(hours=5, minutes=30)
+        hour = local_time.hour
+        buckets[hour] += (o.total_amount or 0.0)
+        total_sales += (o.total_amount or 0.0)
+        
+    # Format buckets to "7 AM To 8 AM" format
+    for h in sorted(buckets.keys()):
+        start_ampm = "AM" if h < 12 else "PM"
+        start_h = h if h <= 12 else h - 12
+        if start_h == 0: start_h = 12
+        
+        end_h_raw = h + 1
+        end_ampm = "AM" if end_h_raw < 12 or end_h_raw == 24 else "PM"
+        end_h = end_h_raw if end_h_raw <= 12 else end_h_raw - 12
+        if end_h == 0: end_h = 12
+        
+        time_label = f"{start_h} {start_ampm} To {end_h} {end_ampm}"
+        timeline.append({"time": time_label, "sales": buckets[h]})
+        
+    starting_bill = None
+    ending_bill = None
+    if orders:
+        first = orders[0]
+        last = orders[-1]
+        starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
+        
+    restaurant = None
+    if restaurant_id:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+
+    return {
+        "date": display_date,
+        "starting_bill": starting_bill,
+        "ending_bill": ending_bill,
+        "timeline": timeline,
+        "total_sales": total_sales,
+        "restaurant": {
+            "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
+            "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
+            "phone": restaurant.phone if restaurant and restaurant.phone else "9597066563",
+            "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
+        }
+    }
+
+@router.get("/api/v1/reports/items")
+def get_item_wise_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+    restaurant_id = resolve_restaurant_id(user, restaurant_id)
+    
+    if start_date and end_date:
+        try:
+            start_target = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_target = datetime.strptime(end_date, "%Y-%m-%d").date()
+            start_of_day = datetime(start_target.year, start_target.month, start_target.day)
+            end_of_day = datetime(end_target.year, end_target.month, end_target.day) + timedelta(days=1)
+            if start_target == end_target:
+                display_date = start_target.strftime('%d/%m/%Y')
+            else:
+                display_date = f"{start_target.strftime('%d/%m/%Y')} to {end_target.strftime('%d/%m/%Y')}"
+        except ValueError:
+            target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
+    else:
+        if date:
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = datetime.utcnow().date()
+        else:
+            target_date = datetime.utcnow().date()
+            
+        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+        end_of_day = start_of_day + timedelta(days=1)
+        display_date = target_date.strftime("%d/%m/%Y")
+    
+    # Adjust for IST (UTC+5:30)
+    utc_start = start_of_day - timedelta(hours=5, minutes=30)
+    utc_end = end_of_day - timedelta(hours=5, minutes=30)
+    
+    paid_condition = or_(
+        func.lower(Order.payment_status) == "paid",
+        and_(
+            or_(Order.payment_status.is_(None), Order.payment_status == ""),
+            Order.status.in_(["SERVED", "COMPLETED"])
+        )
+    )
+    
+    # Get all orders for the day
+    q = db.query(Order).filter(
+        Order.created_at >= utc_start,
+        Order.created_at < utc_end,
+        paid_condition
+    )
+    if restaurant_id:
+        q = q.filter(Order.restaurant_id == restaurant_id)
+        
+    if user.role == "CASHIER":
+        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
+        
+    orders = q.order_by(Order.id.asc()).all()
+    
+    total_sales = 0.0
+    item_aggregates = {}
+    
+    for o in orders:
+        total_sales += (o.total_amount or 0.0)
+        for item in o.items:
+            # We need the item name and rate
+            if not item.menu_item: continue
+            name = item.menu_item.name
+            rate = item.price or item.menu_item.price
+            
+            # Using rate as part of the key in case prices changed, though usually name is enough
+            key = (name, rate)
+            if key not in item_aggregates:
+                item_aggregates[key] = {"qty": 0, "amount": 0.0}
+            
+            item_aggregates[key]["qty"] += item.quantity
+            item_aggregates[key]["amount"] += (item.quantity * rate)
+            
+    items_list = []
+    for (name, rate), data in item_aggregates.items():
+        items_list.append({
+            "name": name,
+            "rate": rate,
+            "qty": data["qty"],
+            "amount": data["amount"]
+        })
+        
+    # Sort by amount descending
+    items_list.sort(key=lambda x: x["amount"], reverse=True)
+    
+    starting_bill = None
+    ending_bill = None
+    if orders:
+        first = orders[0]
+        last = orders[-1]
+        starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
+        
+    restaurant = None
+    if restaurant_id:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
+
+    return {
+        "date": display_date,
+        "starting_bill": starting_bill,
+        "ending_bill": ending_bill,
+        "items": items_list,
+        "total_sales": total_sales,
+        "cgst": 0.00,
+        "sgst": 0.00,
+        "actual_sales": total_sales,
+        "restaurant": {
+            "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
+            "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
+            "phone": restaurant.phone if restaurant and restaurant.phone else "9597066563",
+            "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
+        }
+    }
+

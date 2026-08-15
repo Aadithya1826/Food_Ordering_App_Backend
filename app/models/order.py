@@ -18,6 +18,7 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     restaurant_id = Column(Integer, index=True, nullable=True)
     table_id = Column(Integer, ForeignKey("tables.id"), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
     status = Column(String, index=True, nullable=True)
     payment_method = Column(String, nullable=True)
     payment_status = Column(String, nullable=True)

@@ -26,6 +26,7 @@ class MenuItem(Base):
     price = Column(Float)
     quantity = Column(Integer, default=0)
     is_available = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
     image_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     category = relationship("MenuCategory", back_populates="items")

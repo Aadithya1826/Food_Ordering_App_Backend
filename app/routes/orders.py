@@ -79,6 +79,14 @@ def update_status(
 
     require_restaurant_access(user, order.restaurant_id)
     order.status = data.status
+    
+    # Auto-release table if order is completed or cancelled
+    if data.status in ["COMPLETED", "CANCELLED"] and order.table_id:
+        from ..models.table import Table
+        table = db.query(Table).filter(Table.id == order.table_id).first()
+        if table:
+            table.status = "Vacant"
+            
     db.commit()
 
     return {
@@ -102,6 +110,14 @@ def update_payment_status(
 
     require_restaurant_access(user, order.restaurant_id)
     order.payment_status = data.payment_status
+    
+    # Optional: if paid, sometimes we also consider it completed/released
+    if data.payment_status.lower() == "paid" and order.status == "COMPLETED" and order.table_id:
+        from ..models.table import Table
+        table = db.query(Table).filter(Table.id == order.table_id).first()
+        if table:
+            table.status = "Vacant"
+
     db.commit()
 
     return {
@@ -194,7 +210,13 @@ def create_pos_order(
         if is_takeaway:
             table_id = None
         else:
-            table = db.query(Table).filter(Table.table_number == payload.table_number, Table.restaurant_id == res_id).first()
+            base_num = payload.table_number.replace("T-", "").replace("t-", "").strip()
+            table = db.query(Table).filter(
+                (Table.table_number == payload.table_number) |
+                (Table.table_number == base_num) |
+                (Table.table_number == f"T-{base_num}"),
+                Table.restaurant_id == res_id
+            ).first()
             if not table:
                 table = Table(table_number=payload.table_number, restaurant_id=res_id, capacity=4, status="Occupied")
                 db.add(table)
@@ -208,6 +230,7 @@ def create_pos_order(
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
+            user_id=user.id,
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,
@@ -227,12 +250,7 @@ def create_pos_order(
             db.add(order_item)
         db.commit()
 
-        return {
-            "orderId": new_order.id, 
-            "id": new_order.id, 
-            "order_id": new_order.id, 
-            "message": "Order created successfully"
-        }
+        return {"orderId": new_order.id, "message": "Order created successfully"}
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}

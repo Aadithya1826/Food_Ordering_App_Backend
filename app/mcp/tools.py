@@ -29,6 +29,7 @@ def list_menu_items(db: Session, user, restaurant_id: int | None = None) -> list
             "description": item.description,
             "price": item.price,
             "category_id": item.category_id,
+            "category_name": item.category.name if item.category else None,
             "restaurant_id": item.restaurant_id,
         }
         for item in query.order_by(MenuItem.name).all()
@@ -132,6 +133,7 @@ def search_menu_item(db: Session, user, name: str, restaurant_id: int | None = N
             "description": item.description,
             "price": item.price,
             "category_id": item.category_id,
+            "category_name": item.category.name if item.category else None,
             "restaurant_id": item.restaurant_id,
         }
         for item in items
@@ -258,6 +260,14 @@ def create_order(db: Session, user, payload: dict) -> dict:
     }
 
 
+def trigger_logout(db: Session, user) -> dict:
+    """
+    Trigger the frontend to log the user out of their session.
+    """
+    return {
+        "action": "logout"
+    }
+
 def navigate_to_page(db: Session, user, page: str, subtab: str = None) -> dict:
     """
     Navigate the user's frontend to a specific page. 
@@ -292,7 +302,7 @@ def update_order_status(db: Session, user, order_id: int, status: str) -> dict:
     }
 
 
-def update_menu_item(db: Session, user, item_name: str, price: float = None, is_available: bool = None, item_code: str = None) -> dict:
+def update_menu_item(db: Session, user, item_name: str, price: float = None, is_available: bool = None, item_code: str = None, category_id: int = None) -> dict:
     query = db.query(MenuItem).filter(MenuItem.name.ilike(f"%{item_name}%"))
     query = filter_by_user_restaurant(user, query)
     item = query.first()
@@ -308,6 +318,8 @@ def update_menu_item(db: Session, user, item_name: str, price: float = None, is_
         item.is_available = is_available
     if item_code is not None:
         item.item_code = item_code
+    if category_id is not None:
+        item.category_id = category_id
         
     db.commit()
     db.refresh(item)
@@ -499,12 +511,13 @@ TOOL_REGISTRY = {
         "handler": update_order_status,
     },
     "update_menu_item": {
-        "description": "Update the price, availability, or item ID (item_code) of a menu item.",
+        "description": "Update the price, availability, category_id, or item ID (item_code) of a menu item.",
         "parameters": {
             "item_name": "Name or partial name of the menu item (e.g. 'sambar rice').",
             "price": "Optional. New price.",
             "is_available": "Optional. True if available, false if not.",
-            "item_code": "Optional. New item ID / code (e.g. 'ITM-001')."
+            "item_code": "Optional. New item ID / code (e.g. 'ITM-001').",
+            "category_id": "Optional. New category ID for this item."
         },
         "handler": update_menu_item,
     },
@@ -530,6 +543,11 @@ TOOL_REGISTRY = {
         "description": "Get today's total revenue and number of completed/paid orders.",
         "parameters": {},
         "handler": get_dashboard_summary,
+    },
+    "trigger_logout": {
+        "description": "Trigger a frontend logout for the user. Use this when the user explicitly asks to logout, sign out, or exit the dashboard.",
+        "parameters": {},
+        "handler": trigger_logout,
     },
 }
 
@@ -884,7 +902,9 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
     lines.extend([
         "CRITICAL INSTRUCTION: Adopt a normal, everyday conversational tone. Do not be overly formal (like a robot) and do not be overly informal (avoid heavy slang like 'macha' or 'bhai').",
         "- You MUST strictly match the language of the user's MOST RECENT message. If the user speaks English, you MUST reply in English. Do NOT default to regional languages. Respond in regional languages (Tamil, Hindi, Thanglish, Hinglish) ONLY IF the user speaks them in their most recent message.",
-        "- ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. For Tamil, use ONLY standard Unicode U+0B80-U+0BFF.",
+        "- STRICT ENCODING RULE: ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. Ensure your text contains absolutely NO markdown formatting.",
+        "- For Tamil text, use ONLY standard Unicode U+0B80-U+0BFF. Do NOT use any Grantha, Brahmi, or special symbolic characters. Output pure, simple letters only.",
+        "- If the user asks for ANY reports, metrics, or analytics (e.g. 'what is the total revenue', 'how many orders today', 'sales for noodles'), use the get_reports or get_item_sales_report tools. Calculate or summarize the data returned by these tools and present it to the user conversationally.",
     ])
     
     if not is_voice:
@@ -897,7 +917,14 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
             "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
             "If no tool is needed, set tool_name to null and provide assistant_text.",
             "CONVERSATIONAL ADD FLOW: If the user asks to add or create something (like a hotel, manager, menu item, etc.) but doesn't provide all the necessary details required by the tool parameters, you MUST ask them conversationally for the missing details before calling the tool. Do NOT assume dummy values for required fields. For example, if they say 'add a hotel', reply with 'Sure, what is the name and address of the hotel?'.",
-            "HALLUCINATION PREVENTION: NEVER hallucinate data such as menu items, prices, orders, or statuses. ALWAYS use the appropriate tool (e.g., search_menu_item, list_menu_items, get_order_status) to fetch real data before confirming it exists."
+            "HALLUCINATION PREVENTION: NEVER hallucinate data such as menu items, prices, orders, or statuses. ALWAYS use the appropriate tool (e.g., search_menu_item, list_menu_items, get_order_status) to fetch real data before confirming it exists.",
+            "CONVERSATIONAL FLOW & PERSISTENCE: You must act like a human assistant having a continuous conversation. NEVER simply answer and stop. Always verify the results of your actions, ask clarifying questions if details are missing, and keep following up until the user's ultimate goal is fully completed.",
+            "INTENT TRACKING (CRITICAL): If you are currently in the middle of a step-by-step data collection process for a specific tool (e.g., adding a manager), you MUST remember your ultimate goal. If the user answers your question with a detail (like 'Satish Kumar'), DO NOT ask them what they want to do. Assume their answer is meant to fill the missing parameter for the tool you were just discussing, and immediately ask for the next missing parameter.",
+            "STEP-BY-STEP DATA COLLECTION (CRITICAL): When a tool requires multiple parameters (e.g. creating a manager), NEVER ask for all of them at once. CRITICAL WORKFLOW: As soon as the user provides the VERY FIRST required parameter (e.g. the Name), you MUST IMMEDIATELY invoke the creation tool (e.g. create_manager) using just that parameter. DO NOT WAIT for the rest. Once the record is created, ask for the next missing detail. When the user provides it, IMMEDIATELY invoke the UPDATE tool (e.g. update_manager) using the ID returned from the creation step. (NOTE: If the user provides a string name for a parameter that requires an integer ID, like restaurant_id, you must FIRST use the appropriate list tool, e.g. get_restaurants, to find the ID before calling the update tool). Repeat this loop until all details are filled. CRITICAL STATE TRACKING: DO NOT REPEAT QUESTIONS for parameters already provided in the Conversation History.",
+            "MULTI-TURN TOOL CALLS (CRITICAL): If you asked the user for clarification (e.g. asking for a valid restaurant ID or missing field) in the previous turn, you MUST use their new answer combined with ALL previously gathered parameters from the Conversation History to finally execute the tool. DO NOT forget parameters the user already provided earlier in the chat. Extract them from the history block.",
+            "If a user asks you to verify, check, or find something (e.g., 'are there any noodles?', 'check if X is in Y category'), you MUST use the appropriate tool (like search_menu_item) to get real data. DO NOT GUESS.",
+            "If a tool call requires IDs (like category_id), you must FIRST use the appropriate list tool (like list_menu_categories) to find the ID before calling the update tool.",
+            "DATABASE LANGUAGE RULE: All database records (menu items, categories, etc.) are stored in English. When you extract a name or search query from a regional language to pass as a tool parameter (e.g., passing 'name' to search_menu_item), you MUST strictly translate it to English first. DO NOT pass Tamil/Hindi text into tool parameters."
         ])
     
     # Add role-specific context
