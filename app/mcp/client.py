@@ -27,7 +27,7 @@ class GeminiClient:
         base_url = self.base_url.replace("v1beta2", "v1beta")
         url = f"{base_url}/models/{self.model}:generateContent?key={self.api_key}"
         
-        parts = [{"text": prompt}]
+        parts = []
         if audio_base64:
             parts.append({
                 "inlineData": {
@@ -35,6 +35,7 @@ class GeminiClient:
                     "data": audio_base64
                 }
             })
+        parts.append({"text": prompt})
             
         payload = {
             "contents": [{"parts": parts}],
@@ -139,9 +140,21 @@ class GeminiClient:
         if txt_match:
             result["transcribed_user_text"] = txt_match.group(1)
             
-        ast_match = re.search(r'"assistant_text"\s*:\s*"([^"]+)"', trimmed)
+        ui_actions_match = re.search(r'"ui_actions"\s*:\s*(\[[^\]]*\])', trimmed)
+        if ui_actions_match:
+            try:
+                result["ui_actions"] = json.loads(ui_actions_match.group(1))
+            except:
+                result["ui_actions"] = []
+
+        ast_match = re.search(r'"assistant_text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', trimmed)
         if ast_match:
-            result["assistant_text"] = ast_match.group(1).replace('\\"', '"')
+            try:
+                val = ast_match.group(1)
+                # Decode escaped characters like \n, \", etc.
+                result["assistant_text"] = val.encode().decode('unicode_escape')
+            except:
+                result["assistant_text"] = ast_match.group(1)
             
         return result if result else None
 
