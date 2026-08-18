@@ -1,9 +1,13 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes
 from .mcp import router as mcp_router
-import os
 
 app = FastAPI()
 
