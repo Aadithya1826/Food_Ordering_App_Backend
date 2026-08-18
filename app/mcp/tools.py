@@ -700,10 +700,10 @@ def build_customer_tool_prompt(
         "  → Extract ONLY the 10-digit number. Support spoken digits ('nine eight seven...').",
         "  → MUST be a valid Indian phone number starting with 6, 7, 8, or 9 and exactly 10 digits long.",
         "  → If it is NOT a valid 10-digit Indian number, do NOT advance. Say: 'Please provide a valid 10-digit Indian mobile number.'",
-        "  → If user gives a valid phone number: emit set_customer, advance to MENU_BROWSE.",
-        "  → Say: 'Thank you! What would you like to order today?'",
+        "  → If user gives a valid phone number, check the cart status:",
+        "      - If cart HAS items: emit set_customer, advance to MENU_BROWSE. Say: 'Thank you! Are you ready to checkout, or would you like to order more?'",
+        "      - If cart is EMPTY: emit set_customer, advance to MENU_BROWSE. Say: 'Thank you! What would you like to order today?'",
         "  → ui_actions: [{ action: set_customer, phone: <phone> }, { action: set_flow_stage, stage: MENU_BROWSE }]",
-
 
         "",
         "MENU_BROWSE / ORDER_BUILDING (Pure ordering / cart operations):",
