@@ -410,6 +410,16 @@ async def customer_chat(
             final_text = "Here is your cart."
         elif "trigger_checkout" in action_types:
             final_text = "Let me show you your order."
+        elif "set_customer" in action_types:
+            final_text = "Got it, I've updated your details. What's next?"
+        elif "set_table_number" in action_types:
+            final_text = "Table number confirmed."
+        elif "set_order_type" in action_types:
+            final_text = "Got it."
+        elif "set_flow_stage" in action_types:
+            final_text = "Okay, let's proceed."
+        elif action_types:
+            final_text = "Okay, got it."
         else:
             final_text = "I'm sorry, I didn't quite catch that. How can I help you today?"
 

@@ -204,8 +204,9 @@ def get_public_active_order_for_table(table_number: str, restaurant_id: int = 1,
     table = db.query(Table).filter(Table.table_number.ilike(f"%{clean_table}%"), Table.restaurant_id == restaurant_id).first()
     
     query = db.query(Order).filter(Order.restaurant_id == restaurant_id)
+    from sqlalchemy import cast, String
     if table:
-        query = query.filter(Order.table_id == table.id)
+        query = query.filter(cast(Order.table_id, String) == str(table.id))
     
     order = query.filter(Order.status.in_(["PENDING", "CONFIRMED", "PREPARING", "READY"])).order_by(Order.id.desc()).first()
 
