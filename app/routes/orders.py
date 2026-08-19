@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_
+from datetime import datetime, timedelta
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..schemas.order import OrderStatusUpdate, OrderPaymentStatusUpdate
@@ -130,10 +132,11 @@ def update_payment_status(
 @router.get("/api/v1/orders", response_model=list[dict])
 def get_all_orders(
     restaurant_id: int | None = None,
+    date: str | None = None,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     query = db.query(Order).options(
@@ -141,6 +144,24 @@ def get_all_orders(
     )
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
+
+    if user.role == "CASHIER":
+        query = query.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
+
+    if date:
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = datetime.utcnow().date()
+            
+        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+        end_of_day = start_of_day + timedelta(days=1)
+        
+        # Adjust for IST (UTC+5:30)
+        utc_start = start_of_day - timedelta(hours=5, minutes=30)
+        utc_end = end_of_day - timedelta(hours=5, minutes=30)
+        
+        query = query.filter(Order.created_at >= utc_start, Order.created_at < utc_end)
 
     # For payment dashboard, ordering by latest first
     orders = query.order_by(Order.created_at.desc()).all()
