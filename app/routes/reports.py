@@ -303,8 +303,10 @@ def get_hourly_report(
     if orders:
         first = orders[0]
         last = orders[-1]
-        starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
-        ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
+        first_local = first.created_at + timedelta(hours=5, minutes=30)
+        last_local = last.created_at + timedelta(hours=5, minutes=30)
+        starting_bill = {"no": first.id, "time": first_local.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last.id, "time": last_local.strftime("%I:%M:%S %p")}
         
     restaurant = None
     if restaurant_id:
@@ -426,8 +428,10 @@ def get_item_wise_report(
     if orders:
         first = orders[0]
         last = orders[-1]
-        starting_bill = {"no": first.id, "time": first.created_at.strftime("%I:%M:%S %p")}
-        ending_bill = {"no": last.id, "time": last.created_at.strftime("%I:%M:%S %p")}
+        first_local = first.created_at + timedelta(hours=5, minutes=30)
+        last_local = last.created_at + timedelta(hours=5, minutes=30)
+        starting_bill = {"no": first.id, "time": first_local.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last.id, "time": last_local.strftime("%I:%M:%S %p")}
         
     restaurant = None
     if restaurant_id:
