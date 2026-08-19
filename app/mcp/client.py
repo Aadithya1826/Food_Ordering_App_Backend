@@ -97,6 +97,12 @@ class GeminiClient:
         return str(candidates[0])
 
     def _try_parse_json(self, raw_text: str) -> dict | None:
+        try:
+            with open(r"C:\Users\solai\.gemini\antigravity-ide\brain\45a5a374-3741-46da-816b-0c0dbece4cef\scratch\raw_llm.log", "a", encoding="utf-8") as f:
+                f.write(f"--- RAW LLM OUTPUT ---\n{raw_text}\n----------------------\n")
+        except:
+            pass
+
         trimmed = raw_text.strip()
         
         # Remove markdown JSON fences if they exist

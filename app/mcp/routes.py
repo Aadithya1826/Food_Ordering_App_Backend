@@ -357,10 +357,19 @@ async def customer_chat(
             assistant_text=fallback,
             tool_name=None,
             tool_result=None,
-            audio_payload=_generate_tts_audio(fallback)
+            audio_payload=await _generate_tts_audio(fallback) if request.is_voice else None
         )
 
     tool_name = parsed.get("tool_name")
+    
+    # Debug log
+    try:
+        import json
+        with open(r"C:\Users\solai\.gemini\antigravity-ide\brain\45a5a374-3741-46da-816b-0c0dbece4cef\scratch\parsed.log", "a") as f:
+            f.write(f"PROMPT: {request.prompt}\nPARSED: {json.dumps(parsed)}\n\n")
+    except Exception as e:
+        print("Logging error:", e)
+
     assistant_text = parsed.get("assistant_text", "")
     if isinstance(assistant_text, str):
         assistant_text = assistant_text.strip()
@@ -369,7 +378,7 @@ async def customer_chat(
         
     transcribed_user_text = parsed.get("transcribed_user_text", None)
     params = parsed.get("params", {}) or {}
-    ui_actions = parsed.get("ui_actions", [])
+    ui_actions = parsed.get("ui_actions") or []
 
     # --- Execute tool if requested ---
     tool_result = None

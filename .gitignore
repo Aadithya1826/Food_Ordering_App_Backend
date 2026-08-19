@@ -8,3 +8,6 @@ scratch/
 cloudflared.exe
 
 dataudipi.db
+
+.env
+cloudflared*
