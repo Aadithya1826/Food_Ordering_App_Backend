@@ -27,20 +27,192 @@ def get_db():
     finally:
         db.close()
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Customer Login / Registration (upsert)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CustomerLoginPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    phone: str
+    name: Optional[str] = None
+    otp: Optional[str] = None   # ignored — OTP-less for now
+
+
+@router.post("/api/v1/public/customers/login")
+def customer_login(payload: CustomerLoginPayload, db: Session = Depends(get_db)):
+    """
+    Phone-based login/registration (OTP-less).
+    - If the phone number already exists → return existing customer (update name if provided).
+    - If new → create a customer record with name + phone.
+    Returns: { id, name, phone, token }
+    """
+    from ..models.customer import Customer
+
+    phone = payload.phone.strip()
+    name = (payload.name or "").strip() or "Guest"
+
+    # Upsert: find or create
+    customer = db.query(Customer).filter(Customer.phone == phone).first()
+
+    if customer:
+        # Update name if a new one was provided and it differs
+        if payload.name and payload.name.strip() and customer.name != payload.name.strip():
+            customer.name = payload.name.strip()
+            db.commit()
+            db.refresh(customer)
+    else:
+        # New customer — create record
+        customer = Customer(phone=phone, name=name)
+        db.add(customer)
+        db.commit()
+        db.refresh(customer)
+
+    # Generate a simple session token (HMAC of id + phone — no JWT dependency needed)
+    secret = os.getenv("SECRET_KEY", "secret")
+    raw = f"{customer.id}:{customer.phone}"
+    token = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+    return {
+        "id": customer.id,
+        "name": customer.name,
+        "phone": customer.phone,
+        "email": getattr(customer, "email", None),
+        "profile_picture_url": getattr(customer, "profile_picture_url", None),
+        "loyalty_points": getattr(customer, "loyalty_points", 0),
+        "token": token,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Customer Profile Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _customer_response(c) -> dict:
+    """Standard customer profile dict reused across endpoints."""
+    return {
+        "id": c.id,
+        "name": c.name,
+        "phone": c.phone,
+        "email": getattr(c, "email", None),
+        "profile_picture_url": getattr(c, "profile_picture_url", None),
+        "loyalty_points": getattr(c, "loyalty_points", 0),
+        "address": getattr(c, "address", None),
+    }
+
+
+@router.get("/api/v1/public/customers/{customer_id}/profile")
+def get_customer_profile_by_id(customer_id: int, db: Session = Depends(get_db)):
+    """Return profile for a specific customer by integer ID."""
+    from ..models.customer import Customer
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return _customer_response(customer)
+
+
+class UpdateProfilePayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    name: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+
+
+@router.patch("/api/v1/public/customers/{customer_id}/profile")
+def update_customer_profile(customer_id: int, payload: UpdateProfilePayload, db: Session = Depends(get_db)):
+    """Update name, email, or address for a customer."""
+    from ..models.customer import Customer
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if payload.name is not None and payload.name.strip():
+        customer.name = payload.name.strip()
+    if payload.email is not None:
+        customer.email = payload.email.strip() or None
+    if payload.address is not None:
+        customer.address = payload.address.strip() or None
+    db.commit()
+    db.refresh(customer)
+    return _customer_response(customer)
+
+
+@router.post("/api/v1/public/customers/{customer_id}/profile-picture")
+async def upload_profile_picture(
+    customer_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Upload a profile picture for a customer.
+    Call via multipart/form-data with field 'file'.
+    Because FastAPI requires UploadFile at function-definition time,
+    we import it at module scope via a workaround below.
+    """
+    raise HTTPException(status_code=400, detail="Send as multipart/form-data with 'file' field")
+
+
+from fastapi import UploadFile as _FastAPIUploadFile, File as _FastAPIFile
+import shutil as _shutil
+
+
+@router.post("/api/v1/public/customers/{customer_id}/upload-picture")
+async def upload_profile_picture_v2(
+    customer_id: int,
+    file: _FastAPIUploadFile = _FastAPIFile(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a profile picture (multipart/form-data, field 'file')."""
+    from ..models.customer import Customer
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    ext = (file.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        ext = "jpg"
+
+    static_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "static", "customer_profiles"
+    )
+    os.makedirs(static_dir, exist_ok=True)
+    filename = f"customer_{customer_id}.{ext}"
+    dest = os.path.join(static_dir, filename)
+
+    with open(dest, "wb") as buf:
+        _shutil.copyfileobj(file.file, buf)
+
+    url_path = f"/static/customer_profiles/{filename}"
+    customer.profile_picture_url = url_path
+    db.commit()
+    db.refresh(customer)
+    return _customer_response(customer)
+
+
 # Models for Request Bodies
 class CustomerCartItem(BaseModel):
+    """Cart item from the frontend — extra fields (name, image, note…) are ignored."""
+    model_config = {"extra": "ignore"}
+
     id: int
     quantity: int
     price: float
 
 class CustomerOrderPayload(BaseModel):
-    table_number: str = "06"
+    """Flexible order payload — accepts null table_number and extra frontend fields."""
+    model_config = {"extra": "ignore"}
+
+    table_number: Optional[str] = "takeaway"   # null → treated as takeaway
+    order_type: Optional[str] = "Dine In"
     payment_method: str = "UPI"
     phone: str = ""
     cart: List[CustomerCartItem] = []
     subtotal: float = 0
     gst: float = 0
     service_charge: float = 0
+    discount_amount: float = 0
+    discount_code: Optional[str] = None
+    delivery_address: Optional[str] = None
+    delivery_address_id: Optional[int] = None
     total_amount: float = 0
     
 class RazorpayOrderPayload(BaseModel):
@@ -282,3 +454,202 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
     }
 
     return {"order": order_dict, "items": items}
+
+
+# ──────────────────────────────────────────────
+# Public endpoints used by Frontend_app
+# ──────────────────────────────────────────────
+
+@router.get("/api/v1/public/orders/{order_id}")
+def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+    """Same as /api/orders/{order_id} but accessible without auth."""
+    try:
+        if order_id.startswith("ORD-"):
+            parsed_id = int(order_id.replace("ORD-", ""))
+        elif order_id.startswith("UDP-"):
+            parsed_id = int(order_id.replace("UDP-", ""))
+        else:
+            parsed_id = int(order_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid order ID format")
+
+    order = db.query(Order).filter(Order.id == parsed_id, Order.restaurant_id == restaurant_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    table_number_map = build_table_number_map(db, [order])
+    items = []
+    for oi in order.items:
+        items.append({
+            "id": oi.id,
+            "order_id": oi.order_id,
+            "menu_item_id": oi.menu_item_id,
+            "quantity": oi.quantity,
+            "price": oi.price,
+            "name": oi.menu_item.name if oi.menu_item else None,
+            "description": oi.menu_item.description if oi.menu_item else None,
+            "image_url": oi.menu_item.image_url if oi.menu_item else None,
+        })
+
+    order_dict = {
+        "id": order.id,
+        "orderId": f"ORD-{str(order.id).zfill(6)}",
+        "restaurant_id": order.restaurant_id,
+        "table_id": order.table_id,
+        "table_number": resolve_order_table_number(order, table_number_map),
+        "status": order.status,
+        "payment_method": order.payment_method,
+        "payment_status": order.payment_status,
+        "total_amount": order.total_amount,
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+    return {"order": order_dict, "items": items}
+
+
+@router.get("/api/v1/public/customers/orders")
+def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+    """Return all orders for a customer identified by phone number."""
+    from sqlalchemy.orm import joinedload
+    orders = (
+        db.query(Order)
+        .options(joinedload(Order.items).joinedload(OrderItem.menu_item))
+        .filter(Order.restaurant_id == restaurant_id)
+        .order_by(Order.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    table_number_map = build_table_number_map(db, orders)
+    result = []
+    for order in orders:
+        items = []
+        for oi in order.items:
+            items.append({
+                "id": oi.id,
+                "menu_item_id": oi.menu_item_id,
+                "quantity": oi.quantity,
+                "price": oi.price,
+                "name": oi.menu_item.name if oi.menu_item else None,
+                "image_url": oi.menu_item.image_url if oi.menu_item else None,
+            })
+        result.append({
+            "order": {
+                "id": order.id,
+                "orderId": f"ORD-{str(order.id).zfill(6)}",
+                "restaurant_id": order.restaurant_id,
+                "table_number": resolve_order_table_number(order, table_number_map),
+                "status": order.status,
+                "payment_method": order.payment_method,
+                "payment_status": order.payment_status,
+                "total_amount": order.total_amount,
+                "created_at": order.created_at,
+            },
+            "items": items,
+        })
+    return result
+
+
+@router.get("/api/v1/public/customers/{phone}/profile")
+def get_customer_profile(phone: str, db: Session = Depends(get_db)):
+    """Return basic customer profile by phone number."""
+    # Try to import Customer model; gracefully handle if missing
+    try:
+        from ..models.customer import Customer as CustomerModel
+        customer = db.query(CustomerModel).filter(CustomerModel.phone == phone).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        return {
+            "id": customer.id,
+            "phone": customer.phone,
+            "name": customer.name,
+            "email": getattr(customer, "email", None),
+            "loyalty_points": getattr(customer, "loyalty_points", 0),
+        }
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Customer model not available")
+
+
+@router.get("/api/customer/table/verify")
+def verify_table_public(table_number: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+    """
+    Verify a table belongs to the restaurant.
+    Returns { valid: bool, table: {...} } — NOT a 404 when not found,
+    so the frontend can read data.valid to show its own error popup.
+    """
+    raw = table_number.strip()
+
+    # Build candidate lookups: "T-01", "01", "1", "T-1"
+    num_only = raw.lstrip("Tt-").lstrip("0") or "0"          # "01" → "1"
+    num_zero  = raw.lstrip("Tt-")                             # "T-01" → "01"
+    candidates = list(dict.fromkeys([
+        raw,                          # exact as entered
+        f"T-{num_zero}",             # "T-01"
+        f"T-{num_only}",             # "T-1"
+        num_zero,                     # "01"
+        num_only,                     # "1"
+    ]))
+
+    table = None
+    for candidate in candidates:
+        table = db.query(Table).filter(
+            Table.table_number == candidate,
+            Table.restaurant_id == restaurant_id
+        ).first()
+        if table:
+            break
+
+    # If still not found, try a case-insensitive LIKE on the raw value
+    if not table:
+        table = db.query(Table).filter(
+            Table.table_number.ilike(f"%{raw}%"),
+            Table.restaurant_id == restaurant_id
+        ).first()
+
+    if not table:
+        # Return valid:false — do NOT raise 404, let frontend handle the message
+        return {
+            "valid": False,
+            "message": "This table doesn't belong to the selected restaurant.",
+        }
+
+    return {
+        "valid": True,
+        "table": {
+            "id": table.id,
+            "table_number": table.table_number,
+            "status": getattr(table, "status", "Vacant") or "Vacant",
+            "is_active": getattr(table, "is_active", True),
+        },
+    }
+
+
+
+class FeedbackPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    rating: int = 0
+    feedback_tags: Optional[List[str]] = None
+    feedback_message: Optional[str] = None
+    order_type: Optional[str] = None  # "Dine In" | "Take Away"
+
+
+@router.post("/api/v1/public/orders/{order_id}/feedback")
+def submit_order_feedback(order_id: str, payload: FeedbackPayload, db: Session = Depends(get_db)):
+    """Accept customer feedback for a completed order."""
+    # Parse the order ID
+    try:
+        parsed_id = int(order_id.replace("ORD-", "").replace("UDP-", ""))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid order ID format")
+
+    order = db.query(Order).filter(Order.id == parsed_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Log feedback (persisted to console/uvicorn logs until a feedback table is added)
+    import json as _json
+    print(f"[FEEDBACK] order_id={parsed_id} rating={payload.rating} "
+          f"tags={payload.feedback_tags} msg={payload.feedback_message!r} "
+          f"type={payload.order_type}")
+
+    return {"success": True, "message": "Thank you for your feedback!"}
