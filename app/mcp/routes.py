@@ -5,6 +5,7 @@ import edge_tts
 import json
 from gtts import gTTS
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..utils.dependencies import get_current_user, get_db
@@ -106,27 +107,35 @@ async def natural_language_query(
         try:
             result = execute_tool(db, user, tool_name, params)
             
-            # --- Second Pass: Ask Gemini to summarize the tool result ---
+            ACTION_TOOLS = [
+                "navigate_to_page", "trigger_logout", "create_order",
+                "update_order_status", "update_menu_item", "update_table_status",
+                "update_inventory_stock"
+            ]
+            
             final_assistant_text = assistant_text or f"Invoked tool {tool_name}"
-            actual_user_text = transcribed_user_text if transcribed_user_text else request.prompt
             
-            clean_instructions = build_tool_prompt(user, is_voice=request.is_voice, is_followup=True)
-            
-            followup_prompt = (
-                f"{clean_instructions}\n\n"
-                f"The user said: {actual_user_text}\n"
-                f"You used the tool '{tool_name}' which returned this result:\n{result}\n\n"
-                "Provide a natural, conversational response to the user summarizing this data. "
-                "CRITICAL: Follow the exact same slang, dialect, and font rules as instructed above. "
-                "Respond with valid JSON containing ONLY the key: 'assistant_text'."
-            )
-            try:
-                second_parsed = await client.generate_json(followup_prompt)
-                if "assistant_text" in second_parsed:
-                    final_assistant_text = second_parsed["assistant_text"]
-            except Exception as e:
-                print(f"Error generating follow-up response: {e}")
-            # -----------------------------------------------------------
+            if tool_name not in ACTION_TOOLS:
+                # --- Second Pass: Ask Gemini to summarize the tool result (for READ operations) ---
+                actual_user_text = transcribed_user_text if transcribed_user_text else request.prompt
+                
+                clean_instructions = build_tool_prompt(user, is_voice=request.is_voice, is_followup=True)
+                
+                followup_prompt = (
+                    f"{clean_instructions}\n\n"
+                    f"The user said: {actual_user_text}\n"
+                    f"You used the tool '{tool_name}' which returned this result:\n{result}\n\n"
+                    "Provide a natural, conversational response to the user summarizing this data. "
+                    "CRITICAL: Follow the exact same slang, dialect, and font rules as instructed above. "
+                    "Respond with valid JSON containing ONLY the key: 'assistant_text'."
+                )
+                try:
+                    second_parsed = await client.generate_json(followup_prompt)
+                    if "assistant_text" in second_parsed:
+                        final_assistant_text = second_parsed["assistant_text"]
+                except Exception as e:
+                    print(f"Error generating follow-up response: {e}")
+                # -----------------------------------------------------------
 
             return MCPResponse(
                 assistant_text=final_assistant_text,
@@ -172,23 +181,11 @@ async def voice_assistant_query(
     )
     response = await natural_language_query(text_request, user=user, db=db)
     
-    # Generate high-quality TTS audio for regional languages using gTTS
+    # Generate high-quality TTS audio for regional languages using edge-tts
     audio_base64 = None
     assistant_text = response.assistant_text
     if assistant_text:
-        has_tamil = bool(re.search(r'[\u0B80-\u0BFF]', assistant_text))
-        has_hindi = bool(re.search(r'[\u0900-\u097F]', assistant_text))
-        lang = 'ta' if has_tamil else ('hi' if has_hindi else 'en')
-        
-        try:
-            # We use gTTS to generate the audio in-memory
-            tts = gTTS(text=assistant_text, lang=lang, slow=False)
-            fp = io.BytesIO()
-            tts.write_to_fp(fp)
-            fp.seek(0)
-            audio_base64 = base64.b64encode(fp.read()).decode('utf-8')
-        except Exception as e:
-            print(f"Error generating gTTS audio: {e}")
+        audio_base64 = await _generate_tts_audio(assistant_text)
 
     return MCPVoiceResponse(
         assistant_text=response.assistant_text,
@@ -279,7 +276,7 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
         return None
 
 
-@router.post("/api/v1/public/mcp/customer-chat", response_model=MCPVoiceResponse)
+@router.post("/api/v1/public/mcp/customer-chat")
 async def customer_chat(
     request: CustomerMCPRequest,
     db: Session = Depends(get_db),
@@ -287,7 +284,7 @@ async def customer_chat(
     """
     Public (no-auth) endpoint for the customer UI chatbot.
     Supports text and audio (MediaRecorder audio/webm) input.
-    Returns assistant_text + optional base64 gTTS audio payload.
+    Returns Server-Sent Events (SSE) streaming JSON tokens.
     """
     # Fetch menu to inject into prompt to prevent hallucination
     from ..models.menu import MenuItem, MenuCategory
@@ -338,106 +335,60 @@ async def customer_chat(
         "Respond with valid JSON only."
     )
 
-    # --- Call Gemini (with optional audio) ---
-    try:
-        parsed = await client.generate_json(
-            full_prompt,
-            audio_base64=request.audio_base64
-        )
-    except Exception as e:
-        print(f"[CustomerChat] Gemini error: {e}")
-        error_msg = str(e)
-        if "429" in error_msg:
-            fallback = "I'm sorry, the AI service is busy right now. Please try again in a moment."
-        elif "503" in error_msg:
-            fallback = "I'm sorry, the AI service is temporarily unavailable. Please try again later."
-        else:
-            fallback = "Sorry, I couldn't understand that. Could you please try again?"
-        return MCPVoiceResponse(
-            assistant_text=fallback,
-            tool_name=None,
-            tool_result=None,
-            audio_payload=await _generate_tts_audio(fallback) if request.is_voice else None
-        )
-
-    tool_name = parsed.get("tool_name")
-    
-    # Debug log
-    try:
-        import json
-        with open(r"C:\Users\solai\.gemini\antigravity-ide\brain\45a5a374-3741-46da-816b-0c0dbece4cef\scratch\parsed.log", "a") as f:
-            f.write(f"PROMPT: {request.prompt}\nPARSED: {json.dumps(parsed)}\n\n")
-    except Exception as e:
-        print("Logging error:", e)
-
-    assistant_text = parsed.get("assistant_text", "")
-    if isinstance(assistant_text, str):
-        assistant_text = assistant_text.strip()
-    else:
-        assistant_text = ""
-        
-    transcribed_user_text = parsed.get("transcribed_user_text", None)
-    params = parsed.get("params", {}) or {}
-    ui_actions = parsed.get("ui_actions") or []
-
-    # --- Execute tool if requested ---
-    tool_result = None
-    if tool_name and tool_name in CUSTOMER_TOOL_REGISTRY:
+    async def _stream_customer_chat():
+        full_text = ""
         try:
-            handler = CUSTOMER_TOOL_REGISTRY[tool_name]["handler"]
-            # Public handlers take (db, **params) — no user object
-            tool_result = handler(db, **params)
+            async for chunk in client.generate_json_stream(
+                full_prompt,
+                audio_base64=request.audio_base64
+            ):
+                full_text += chunk
+                yield f"data: {json.dumps({'type': 'llm_chunk', 'chunk': chunk})}\n\n"
+        except Exception as e:
+            print(f"[CustomerChat] Gemini streaming error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-            # --- Second pass: summarize tool result in natural language ---
-            followup_prompt = (
-                f"{build_customer_tool_prompt(is_voice=request.is_voice, is_followup=True, menu_text=menu_text, order_id=request.order_id, current_page=request.current_page, order_type=request.order_type, cart_data=request.cart_data, customer_name=request.customer_name, customer_phone=request.customer_phone)}\n\n"
-                f"The customer asked: {transcribed_user_text or request.prompt}\n"
-                f"You used the tool '{tool_name}' and got this result:\n{tool_result}\n\n"
-                "Give a natural, conversational answer summarizing this data. "
-                "Return JSON with ONLY the key: 'assistant_text'."
-            )
-            try:
-                second = await client.generate_json(followup_prompt)
-                if "assistant_text" in second:
-                    assistant_text = second["assistant_text"]
-            except Exception as e2:
-                print(f"[CustomerChat] Follow-up error: {e2}")
+        parsed = client._try_parse_json(full_text)
+        if not parsed:
+            parsed = {}
 
-        except Exception as tool_err:
-            print(f"[CustomerChat] Tool execution error: {tool_err}")
-            assistant_text = assistant_text or "I couldn't retrieve that information right now. Please try again."
+        transcribed = parsed.get("transcribed_user_text")
+        if transcribed:
+            yield f"data: {json.dumps({'type': 'transcription', 'text': transcribed})}\n\n"
 
-    if assistant_text:
-        final_text = assistant_text
-    else:
-        action_types = [a.get("action") for a in ui_actions if isinstance(a, dict)]
-        if "add_to_cart" in action_types:
-            final_text = "Okay, I've updated your order. Anything else?"
-        elif "navigate" in action_types:
-            final_text = "Sure, taking you there now."
-        elif "view_cart" in action_types:
-            final_text = "Here is your cart."
-        elif "trigger_checkout" in action_types:
-            final_text = "Let me show you your order."
-        elif "set_customer" in action_types:
-            final_text = "Got it, I've updated your details. What's next?"
-        elif "set_table_number" in action_types:
-            final_text = "Table number confirmed."
-        elif "set_order_type" in action_types:
-            final_text = "Got it."
-        elif "set_flow_stage" in action_types:
-            final_text = "Okay, let's proceed."
-        elif action_types:
-            final_text = "Okay, got it."
-        else:
-            final_text = "I'm sorry, I didn't quite catch that. How can I help you today?"
+        ui_actions = parsed.get("ui_actions", [])
+        if ui_actions:
+            yield f"data: {json.dumps({'type': 'ui_actions', 'actions': ui_actions})}\n\n"
 
-    return MCPVoiceResponse(
-        assistant_text=final_text,
-        transcribed_user_text=transcribed_user_text,
-        tool_name=None,           # chatbot never calls DB tools
-        tool_result=None,
-        parameters=params,
-        ui_actions=ui_actions,
-        audio_payload=await _generate_tts_audio(final_text, request.detected_language) if request.is_voice else None,
-    )
+        assistant_text = parsed.get("assistant_text", "")
+        
+        # Determine fallback if empty
+        if not assistant_text:
+            action_types = [a.get("action") for a in ui_actions if isinstance(a, dict)]
+            if "add_to_cart" in action_types:
+                assistant_text = "Okay, I've updated your order. Anything else?"
+            elif "navigate" in action_types:
+                assistant_text = "Sure, taking you there now."
+            elif "view_cart" in action_types:
+                assistant_text = "Here is your cart."
+            elif "trigger_checkout" in action_types:
+                assistant_text = "Let me show you your order."
+            elif "set_customer" in action_types:
+                assistant_text = "Got it, I've updated your details. What's next?"
+            elif "set_table_number" in action_types:
+                assistant_text = "Table number confirmed."
+            elif "set_order_type" in action_types:
+                assistant_text = "Got it."
+            elif action_types:
+                assistant_text = "Okay, got it."
+            else:
+                assistant_text = "I'm sorry, I didn't quite catch that. How can I help you today?"
+
+        if assistant_text and request.is_voice:
+            audio = await _generate_tts_audio(assistant_text, request.detected_language)
+            if audio:
+                yield f"data: {json.dumps({'type': 'audio', 'payload': audio})}\n\n"
+                
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(_stream_customer_chat(), media_type="text/event-stream")

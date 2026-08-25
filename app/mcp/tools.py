@@ -193,11 +193,29 @@ def get_order_status(db: Session, user, order_id: int = None, table_number: str 
 
 def create_order(db: Session, user, payload: dict) -> dict:
     order_data = OrderCreate.model_validate(payload)
-    table = db.query(Table).filter(Table.id == order_data.table_id).first()
-    if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
-
-    require_restaurant_access(user, table.restaurant_id)
+    
+    order_type = order_data.order_type.upper()
+    valid_types = ["DINE_IN", "TAKEAWAY", "DELIVERY"]
+    if order_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Invalid order type. Must be one of {valid_types}")
+        
+    # Validation logic based on order_type
+    restaurant_id = user.restaurant_id
+    if order_type == "DINE_IN":
+        if not order_data.table_id:
+            raise HTTPException(status_code=400, detail="table_id is required for DINE_IN orders")
+        table = db.query(Table).filter(Table.id == order_data.table_id).first()
+        if not table:
+            raise HTTPException(status_code=404, detail="Table not found")
+        require_restaurant_access(user, table.restaurant_id)
+        restaurant_id = table.restaurant_id
+    elif order_type == "DELIVERY":
+        if not order_data.delivery_address_id:
+            raise HTTPException(status_code=400, detail="delivery_address_id is required for DELIVERY orders")
+        order_data.table_id = None
+    elif order_type == "TAKEAWAY":
+        order_data.table_id = None
+        order_data.delivery_address_id = None
 
     if not order_data.items:
         raise HTTPException(status_code=400, detail="Order must contain at least one item")
@@ -222,8 +240,10 @@ def create_order(db: Session, user, payload: dict) -> dict:
         order_items.append((menu_item, quantity, price))
 
     order = Order(
-        restaurant_id=table.restaurant_id,
-        table_id=table.id,
+        restaurant_id=restaurant_id,
+        table_id=order_data.table_id,
+        order_type=order_type,
+        delivery_address_id=order_data.delivery_address_id,
         status="PENDING",
         total_amount=total_amount,
     )
@@ -247,6 +267,8 @@ def create_order(db: Session, user, payload: dict) -> dict:
         "order_id": order.id,
         "status": order.status,
         "table_id": order.table_id,
+        "order_type": order.order_type,
+        "delivery_address_id": order.delivery_address_id,
         "restaurant_id": order.restaurant_id,
         "total_amount": order.total_amount,
         "items": [
@@ -422,6 +444,15 @@ def get_dashboard_summary(db: Session, user) -> dict:
     }
 
 
+def control_chat_window(db: Session, user, action: str) -> dict:
+    """
+    Control the voice assistant's chat window UI.
+    Valid actions: 'minimize', 'maximize'
+    """
+    return {
+        "action": action
+    }
+
 # ── Public Customer Tool Registry (no auth, read-only) ─────────────────────
 CUSTOMER_TOOL_REGISTRY = {
     "list_menu_categories": {
@@ -474,9 +505,11 @@ TOOL_REGISTRY = {
         "handler": search_menu_item,
     },
     "create_order": {
-        "description": "Create a new order for a customer table.",
+        "description": "Create a new order for a customer table, takeaway, or delivery.",
         "parameters": {
-            "table_id": "Table ID for the order.",
+            "table_id": "Optional. Table ID for DINE_IN orders.",
+            "order_type": "Optional. 'DINE_IN', 'TAKEAWAY', or 'DELIVERY'. Defaults to 'DINE_IN'.",
+            "delivery_address_id": "Optional. Delivery address ID for DELIVERY orders.",
             "items": "List of menu item IDs and quantities.",
         },
         "handler": create_order,
@@ -548,6 +581,13 @@ TOOL_REGISTRY = {
         "description": "Trigger a frontend logout for the user. Use this when the user explicitly asks to logout, sign out, or exit the dashboard.",
         "parameters": {},
         "handler": trigger_logout,
+    },
+    "control_chat_window": {
+        "description": "Minimize or hide the voice assistant chat window. Use this when the user asks you to close, hide, or minimize yourself.",
+        "parameters": {
+            "action": "The action to perform. Usually 'minimize'."
+        },
+        "handler": control_chat_window,
     },
 }
 
@@ -933,7 +973,7 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
         lines.append("Return only valid JSON with the keys: transcribed_user_text, tool_name, params, assistant_text.")
         
     lines.extend([
-        "CRITICAL INSTRUCTION: Adopt a normal, everyday conversational tone. Do not be overly formal (like a robot) and do not be overly informal (avoid heavy slang like 'macha' or 'bhai').",
+        "CRITICAL INSTRUCTION: Adopt a natural, everyday spoken conversational tone (e.g., Spoken Tamil). Do NOT use highly formal, 'pure', or textbook translations (e.g., avoid written/literary Tamil). Keep it sounding like a normal human assistant, but avoid overly informal slang words like 'macha' or 'bhai'. For example, in Tamil, say 'சரி, ஆர்டர் செய்றேன்' instead of 'நான் ஆர்டர் செய்கிறேன்'.",
         "- You MUST strictly match the language of the user's MOST RECENT message. If the user speaks English, you MUST reply in English. Do NOT default to regional languages. Respond in regional languages (Tamil, Hindi, Thanglish, Hinglish) ONLY IF the user speaks them in their most recent message.",
         "- STRICT ENCODING RULE: ALWAYS use standard plain text characters. NEVER use bold, italics, markdown, emojis, mathematical alphanumeric symbols, or extended unicode blocks. Ensure your text contains absolutely NO markdown formatting.",
         "- For Tamil text, use ONLY standard Unicode U+0B80-U+0BFF. Do NOT use any Grantha, Brahmi, or special symbolic characters. Output pure, simple letters only.",
@@ -949,6 +989,7 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
         lines.extend([
             "For 'transcribed_user_text', transcribe EXACTLY what the user said in the language and script they spoke. Do not translate it to English.",
             "If no tool is needed, set tool_name to null and provide assistant_text.",
+            "CRITICAL: Even if you are calling a tool, you MUST provide a conversational `assistant_text` describing what you are doing (e.g. 'I am navigating to the menu.', 'I am logging you out.'). Do not leave `assistant_text` empty when calling an action tool.",
             "CONVERSATIONAL FLOW & PERSISTENCE: You must act like a human assistant having a continuous conversation. NEVER simply answer and stop. Always verify the results of your actions, ask clarifying questions if details are missing, and keep following up until the user's ultimate goal is fully completed.",
             "INTENT TRACKING (CRITICAL): If you are currently in the middle of a step-by-step data collection process for a specific tool (e.g., adding a manager), you MUST remember your ultimate goal. If the user answers your question with a detail (like 'Satish Kumar'), DO NOT ask them what they want to do. Assume their answer is meant to fill the missing parameter for the tool you were just discussing, and immediately ask for the next missing parameter.",
             "STEP-BY-STEP DATA COLLECTION (CRITICAL): When a tool requires multiple parameters (e.g. creating a manager), NEVER ask for all of them at once. CRITICAL WORKFLOW: As soon as the user provides the VERY FIRST required parameter (e.g. the Name), you MUST IMMEDIATELY invoke the creation tool (e.g. create_manager) using just that parameter. DO NOT WAIT for the rest. Once the record is created, ask for the next missing detail. When the user provides it, IMMEDIATELY invoke the UPDATE tool (e.g. update_manager) using the ID returned from the creation step. (NOTE: If the user provides a string name for a parameter that requires an integer ID, like restaurant_id, you must FIRST use the appropriate list tool, e.g. get_restaurants, to find the ID before calling the update tool). Repeat this loop until all details are filled. CRITICAL STATE TRACKING: DO NOT REPEAT QUESTIONS for parameters already provided in the Conversation History.",
