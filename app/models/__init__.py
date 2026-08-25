@@ -5,3 +5,5 @@ from .table import Table
 from .order import Order, OrderItem
 from .inventory import InventoryItem
 from .recipe import RecipeIngredient
+from .customer import Customer, CustomerAddress
+from .delivery import DeliveryPartner, DeliveryAssignment, RiderLocation, DeliveryStatusHistory

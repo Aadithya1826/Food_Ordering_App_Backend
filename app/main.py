@@ -3,10 +3,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking
 from .mcp import router as mcp_router
 
 app = FastAPI()
@@ -42,6 +43,21 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+
+# Global handler so CORS headers are present even on unhandled 500 errors.
+# Without this, CORSMiddleware does not attach headers to error responses and
+# the browser reports a misleading "CORS policy" error instead of the real one.
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    origin = request.headers.get("origin", "*")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
 app.include_router(menu.router)
 app.include_router(orders.router)
 app.include_router(table.router)
@@ -51,3 +67,6 @@ app.include_router(reports.router)
 app.include_router(mcp_router)
 app.include_router(customer.router)
 app.include_router(recipes.router)
+app.include_router(customer_delivery.router)
+app.include_router(delivery_assignments.router)
+app.include_router(delivery_tracking.router)
