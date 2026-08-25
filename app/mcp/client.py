@@ -5,10 +5,10 @@ import re
 import httpx
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 # Fallback if .env still has the deprecated model
-if GEMINI_MODEL == "gemini-1.5-pro" or GEMINI_MODEL == "gemini-2.5-pro":
-    GEMINI_MODEL = "gemini-2.5-flash"
+if GEMINI_MODEL in ("gemini-1.5-pro", "gemini-2.5-pro", "gemini-2.5-flash"):
+    GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta2")
 
 if not GEMINI_API_KEY:
@@ -61,6 +61,47 @@ class GeminiClient:
         if parsed is None:
             raise ValueError(f"Gemini response could not be parsed as JSON. Raw text: {raw_text}")
         return parsed
+
+    async def generate_json_stream(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, audio_base64: str = None):
+        base_url = self.base_url.replace("v1beta2", "v1beta")
+        url = f"{base_url}/models/{self.model}:streamGenerateContent?key={self.api_key}&alt=sse"
+        
+        parts = [{"text": prompt}]
+        if audio_base64:
+            parts.append({
+                "inlineData": {
+                    "mimeType": "audio/webm",
+                    "data": audio_base64
+                }
+            })
+            
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+                "responseMimeType": "application/json"
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data_json = json.loads(data_str)
+                            if "candidates" in data_json and len(data_json["candidates"]) > 0:
+                                candidate = data_json["candidates"][0]
+                                if "content" in candidate and "parts" in candidate["content"]:
+                                    for part in candidate["content"]["parts"]:
+                                        if "text" in part:
+                                            yield part["text"]
+                        except json.JSONDecodeError:
+                            pass
 
     async def generate_speech(self, text: str, audio_encoding: str = "MP3") -> dict:
         url = f"{self.base_url}/models/{self.model}:generateSpeech?key={self.api_key}"
