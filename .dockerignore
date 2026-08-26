@@ -1,0 +1,9 @@
+.env
+.git
+.idea
+__pycache__
+*.pyc
+*.db
+tests
+node_modules
+qr_code_outputs

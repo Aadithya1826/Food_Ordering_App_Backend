@@ -7,9 +7,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from ..models.user import User
-
-SECRET_KEY = "secret"
-ALGORITHM = "HS256"
+from ..utils.auth import SECRET_KEY, ALGORITHM
 
 
 def verify_jwt_token(token: str) -> dict:

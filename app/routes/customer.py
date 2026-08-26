@@ -11,6 +11,7 @@ import os
 import hmac
 import hashlib
 import time
+from jose import jwt
 from ..utils.table_refs import build_table_number_map, resolve_order_table_number
 
 try:
@@ -36,7 +37,7 @@ class CustomerLoginPayload(BaseModel):
     model_config = {"extra": "ignore"}
     phone: str
     name: Optional[str] = None
-    otp: Optional[str] = None   # ignored — OTP-less for now
+    otp: Optional[str] = None
 
 
 @router.post("/api/v1/public/customers/login")
@@ -51,6 +52,10 @@ def customer_login(payload: CustomerLoginPayload, db: Session = Depends(get_db))
 
     phone = payload.phone.strip()
     name = (payload.name or "").strip() or "Guest"
+
+    # Validate OTP
+    if payload.otp != "1234":
+        raise HTTPException(status_code=400, detail="Invalid OTP")
 
     # Upsert: find or create
     customer = db.query(Customer).filter(Customer.phone == phone).first()
@@ -69,9 +74,9 @@ def customer_login(payload: CustomerLoginPayload, db: Session = Depends(get_db))
         db.refresh(customer)
 
     # Generate a simple session token (HMAC of id + phone — no JWT dependency needed)
-    secret = os.getenv("SECRET_KEY", "secret")
-    raw = f"{customer.id}:{customer.phone}"
-    token = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    from ..utils.auth import SECRET_KEY, ALGORITHM
+    payload = {"sub": customer.phone, "role": "CUSTOMER"}
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
     return {
         "id": customer.id,

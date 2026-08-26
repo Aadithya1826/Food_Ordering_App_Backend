@@ -13,6 +13,31 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    # State Transition Validation
+    valid_transitions = {
+        "PENDING": ["ASSIGNED", "CANCELLED"],
+        "ASSIGNED": ["ACCEPTED", "REJECTED", "CANCELLED"],
+        "ACCEPTED": ["GOING_TO_RESTAURANT", "CANCELLED"],
+        "GOING_TO_RESTAURANT": ["ARRIVED_AT_RESTAURANT", "CANCELLED"],
+        "ARRIVED_AT_RESTAURANT": ["PICKED_UP", "CANCELLED"],
+        "PICKED_UP": ["OUT_FOR_DELIVERY", "ARRIVED_AT_CUSTOMER", "CANCELLED"],
+        "OUT_FOR_DELIVERY": ["ARRIVED_AT_CUSTOMER", "CANCELLED"],
+        "ARRIVED_AT_CUSTOMER": ["DELIVERED", "FAILED", "CANCELLED"],
+        "DELIVERED": [],
+        "REJECTED": [],
+        "FAILED": [],
+        "CANCELLED": []
+    }
+    
+    current_status = assignment.status or "PENDING"
+    
+    if current_status == "DELIVERED" and new_status == "DELIVERED":
+        raise HTTPException(status_code=400, detail="Delivery already completed")
+        
+
+    if current_status in valid_transitions and new_status not in valid_transitions[current_status]:
+        raise HTTPException(status_code=400, detail=f"Invalid state transition from {current_status} to {new_status}")
+
     # Mapping of assignment status to order.delivery_status
     status_mapping = {
         "ASSIGNED": "RIDER_ASSIGNED",
@@ -35,6 +60,21 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
     now = datetime.utcnow()
     
     try:
+        from ..models.delivery import DeliveryPartner
+        rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == assignment.rider_id).first()
+        
+        if new_status == "ACCEPTED" and rider:
+            rider.is_available = False
+            
+        if new_status == "DELIVERED" and current_status != "DELIVERED":
+            # Increment total rides exactly once
+            if rider:
+                rider.total_rides = (rider.total_rides or 0) + 1
+                rider.is_available = True
+                
+        if new_status in ["REJECTED", "FAILED", "CANCELLED"] and rider:
+            rider.is_available = True
+                
         # Update Assignment
         assignment.status = new_status
         if new_status == "ACCEPTED":

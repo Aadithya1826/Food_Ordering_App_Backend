@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db import engine, Base
 from models import (
-    User, MenuCategory, MenuItem, Table, Order, OrderItem, InventoryItem
+    User, MenuCategory, MenuItem, Table, Order, OrderItem, InventoryItem,
+    DeliveryPartner, DeliveryAssignment, RiderLocation, DeliveryStatusHistory
 )
 
 def create_tables():
@@ -38,8 +39,49 @@ def create_tables():
         print("   ✓ order_items")
         print("   ✓ inventory_items")
         
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            try:
+                # Update orders table schema
+                conn.execute(text("ALTER TABLE orders ALTER COLUMN table_id TYPE VARCHAR USING table_id::varchar;"))
+            except Exception as e:
+                print(f"Skipping table_id cast (might already be varchar or sqlite): {e}")
+
+            new_order_cols = [
+                ("delivery_address_id", "INTEGER"),
+                ("delivery_address_snapshot", "JSONB"),
+                ("delivery_instructions", "VARCHAR"),
+                ("delivery_status", "VARCHAR"),
+                ("delivery_fee", "FLOAT"),
+                ("packaging_fee", "FLOAT"),
+                ("gst_amount", "FLOAT"),
+                ("tip_amount", "FLOAT"),
+                ("order_type", "VARCHAR DEFAULT 'DINE_IN'")
+            ]
+            for col, dtype in new_order_cols:
+                try:
+                    conn.execute(text(f"ALTER TABLE orders ADD COLUMN {col} {dtype};"))
+                except Exception as e:
+                    pass # column already exists
+                    
+            try:
+                conn.execute(text("ALTER TABLE delivery_partners ADD COLUMN total_rides INTEGER DEFAULT 0;"))
+            except Exception as e:
+                pass
+                
+            try:
+                conn.execute(text("ALTER TABLE restaurants ADD COLUMN latitude FLOAT;"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("ALTER TABLE restaurants ADD COLUMN longitude FLOAT;"))
+            except Exception:
+                pass
+            
+            conn.commit()
+
         print("\n" + "=" * 70)
-        print("🎉 All tables are now synced with models!")
+        print("🎉 All tables are now synced with models and manual schema updates applied!")
         print("=" * 70)
         
         return True

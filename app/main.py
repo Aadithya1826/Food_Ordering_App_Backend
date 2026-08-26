@@ -7,10 +7,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider
 from .mcp import router as mcp_router
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 # Ensure static/images directory exists
 os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images"), exist_ok=True)
@@ -36,7 +44,7 @@ app.add_middleware(
         "http://dev-ui.dataudipi.com",
         "https://dev-ui.dataudipi.com"
     ],
-    allow_origin_regex="https://.*\\.trycloudflare\\.com",
+    allow_origin_regex="https://.*\\.dataudipi\\.com", # restrict to dataudipi domains instead of trycloudflare
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,14 +57,10 @@ app.include_router(auth.router)
 # the browser reports a misleading "CORS policy" error instead of the real one.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    origin = request.headers.get("origin", "*")
+    logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc)},
-        headers={
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
-        },
+        content={"detail": "Internal Server Error"}
     )
 app.include_router(menu.router)
 app.include_router(orders.router)
@@ -70,3 +74,5 @@ app.include_router(recipes.router)
 app.include_router(customer_delivery.router)
 app.include_router(delivery_assignments.router)
 app.include_router(delivery_tracking.router)
+app.include_router(payments.router)
+app.include_router(rider.router)

@@ -4,6 +4,7 @@ from ..db import SessionLocal
 from ..models.order import Order
 from ..models.delivery import DeliveryAssignment
 from ..services.delivery_status import update_delivery_status
+from ..utils.dependencies import get_current_rider
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -33,13 +34,13 @@ def create_assignment(payload: AssignmentCreate, db: Session = Depends(get_db)):
     
     if assignment:
         assignment.rider_id = payload.rider_id
-        assignment.status = "ASSIGNED"
+        assignment.status = "PENDING"
         assignment.assigned_at = datetime.utcnow()
     else:
         assignment = DeliveryAssignment(
             order_id=payload.order_id,
             rider_id=payload.rider_id,
-            status="ASSIGNED",
+            status="PENDING",
             assigned_at=datetime.utcnow()
         )
         db.add(assignment)
@@ -47,7 +48,7 @@ def create_assignment(payload: AssignmentCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(assignment)
     
-    # Use the service to update order and history
+    # Use the service to update order and history, transitioning from PENDING to ASSIGNED
     update_delivery_status(db, assignment.id, "ASSIGNED", "Initial Assignment")
     return assignment
 
@@ -60,7 +61,7 @@ def get_available_orders(db: Session = Depends(get_db)):
     ).subquery()
     
     available_orders = db.query(Order).filter(
-        Order.order_type == "Delivery",
+        Order.order_type == "DELIVERY",
         Order.status.in_(["PENDING", "CONFIRMED", "PREPARING"]),
         ~Order.id.in_(active_assignments)
     ).order_by(Order.created_at.desc()).all()
@@ -88,38 +89,54 @@ def get_assignment(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No assignment found for this order")
     return assignment
 
+def check_rider_ownership(db: Session, assignment_id: int, rider_id: int):
+    assignment = db.query(DeliveryAssignment).filter(DeliveryAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if assignment.rider_id != rider_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this assignment")
+
 @router.post("/api/v1/delivery/assignments/{assignment_id}/accept")
-def accept_assignment(assignment_id: int, db: Session = Depends(get_db)):
+def accept_assignment(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "ACCEPTED")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/reject")
-def reject_assignment(assignment_id: int, db: Session = Depends(get_db)):
+def reject_assignment(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "REJECTED")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/going-to-restaurant")
-def going_to_restaurant(assignment_id: int, db: Session = Depends(get_db)):
+def going_to_restaurant(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "GOING_TO_RESTAURANT")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/arrived-restaurant")
-def arrived_restaurant(assignment_id: int, db: Session = Depends(get_db)):
+def arrived_restaurant(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "ARRIVED_AT_RESTAURANT")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/pickup")
-def pickup(assignment_id: int, db: Session = Depends(get_db)):
+def pickup(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "PICKED_UP")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/arrived-customer")
-def arrived_customer(assignment_id: int, db: Session = Depends(get_db)):
+def arrived_customer(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "ARRIVED_AT_CUSTOMER")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/delivered")
-def delivered(assignment_id: int, db: Session = Depends(get_db)):
+def delivered(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "DELIVERED")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/failed")
-def failed(assignment_id: int, db: Session = Depends(get_db)):
+def failed(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "FAILED")
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/cancel")
-def cancel(assignment_id: int, db: Session = Depends(get_db)):
+def cancel(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "CANCELLED")

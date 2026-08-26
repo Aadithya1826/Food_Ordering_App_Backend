@@ -10,6 +10,8 @@ class Restaurant(Base):
     name = Column(String, unique=True, index=True)
     address = Column(Text, nullable=True)
     phone = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
     
     # New Settings Fields
     gst_number = Column(String, nullable=True)
