@@ -5,7 +5,9 @@ from jose import jwt
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 
-SECRET_KEY = os.getenv("SECRET_KEY", "secret")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable is not set. A secure key is required for production.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -31,11 +33,13 @@ def verify_password(plain, hashed):
         return False
 
 
-def create_token(user):
+def create_token(user, account_type: str = "USER"):
     data = {
         "user_id": str(user.id),
         "role": user.role,
-        "restaurant_id": user.restaurant_id
+        "restaurant_id": getattr(user, "restaurant_id", None),
+        "account_type": account_type,
+        "sub": str(user.id)
     }
 
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

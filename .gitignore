@@ -11,3 +11,4 @@ dataudipi.db
 
 .env
 cloudflared*
+*.db

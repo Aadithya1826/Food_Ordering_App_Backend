@@ -4,6 +4,7 @@ from ..db import SessionLocal
 from ..models.order import Order
 from ..models.delivery import DeliveryPartner, DeliveryAssignment, RiderLocation, DeliveryStatusHistory
 from ..models.restaurant import Restaurant
+from ..utils.dependencies import get_current_rider
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -28,8 +29,9 @@ class LocationPayload(BaseModel):
 class RiderStatusPayload(BaseModel):
     is_online: bool
 
-@router.put("/api/v1/riders/{rider_id}/status")
-def update_rider_status(rider_id: int, payload: RiderStatusPayload, db: Session = Depends(get_db)):
+@router.put("/api/v1/riders/me/status")
+def update_rider_status(payload: RiderStatusPayload, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    rider_id = current_rider.id
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")
@@ -39,8 +41,9 @@ def update_rider_status(rider_id: int, payload: RiderStatusPayload, db: Session 
     
     return {"success": True, "is_online": rider.is_online}
 
-@router.post("/api/v1/riders/{rider_id}/location")
-def update_rider_location(rider_id: int, payload: LocationPayload, db: Session = Depends(get_db)):
+@router.post("/api/v1/riders/me/location")
+def update_rider_location(payload: LocationPayload, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    rider_id = current_rider.id
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")
@@ -74,8 +77,9 @@ def update_rider_location(rider_id: int, payload: LocationPayload, db: Session =
     db.commit()
     return {"success": True}
 
-@router.get("/api/v1/riders/{rider_id}/location")
-def get_rider_location(rider_id: int, db: Session = Depends(get_db)):
+@router.get("/api/v1/riders/me/location")
+def get_rider_location(current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+    rider_id = current_rider.id
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")
@@ -201,8 +205,8 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         "restaurant": {
             "id": restaurant.id if restaurant else None,
             "name": restaurant.name if restaurant else "Restaurant",
-            "latitude": 13.0000000,  # Placeholder — Restaurant table has no lat/lng yet
-            "longitude": 80.0000000,
+            "latitude": float(restaurant.latitude) if restaurant and restaurant.latitude else None,
+            "longitude": float(restaurant.longitude) if restaurant and restaurant.longitude else None,
         },
         "delivery_address": address_data,
         "rider": rider_data,

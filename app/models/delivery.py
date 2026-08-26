@@ -18,6 +18,7 @@ class DeliveryPartner(Base):
     is_online = Column(Boolean, default=False)
     is_available = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
+    total_rides = Column(Integer, default=0)
     current_latitude = Column(Float, nullable=True)
     current_longitude = Column(Float, nullable=True)
     last_location_at = Column(DateTime, nullable=True)
