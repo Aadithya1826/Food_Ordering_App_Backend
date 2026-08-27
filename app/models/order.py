@@ -41,7 +41,6 @@ class Order(Base):
     total_amount = Column(Float, nullable=True)
     
     # Delivery and Advanced Order Fields
-    delivery_address_id = Column(Integer, ForeignKey("customer_addresses.id"), nullable=True)
     delivery_address_snapshot = Column(JSONB, nullable=True)
     delivery_instructions = Column(String, nullable=True)
     delivery_status = Column(String, nullable=True)
@@ -49,7 +48,6 @@ class Order(Base):
     packaging_fee = Column(Float, nullable=True)
     gst_amount = Column(Float, nullable=True)
     tip_amount = Column(Float, nullable=True)
-    order_type = Column(String, nullable=True, default="DINE_IN")
     
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
