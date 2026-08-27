@@ -269,7 +269,7 @@ def get_hourly_report(
         q = q.filter(Order.restaurant_id == restaurant_id)
         
     if user.role == "CASHIER":
-        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
+        q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
     
@@ -388,7 +388,7 @@ def get_item_wise_report(
         q = q.filter(Order.restaurant_id == restaurant_id)
         
     if user.role == "CASHIER":
-        q = q.filter(or_(Order.user_id == user.id, Order.user_id.is_(None)))
+        q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
     
