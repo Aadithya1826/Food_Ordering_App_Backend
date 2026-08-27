@@ -196,7 +196,7 @@ def get_all_orders(
 
     return response
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class PosCartItem(BaseModel):
     id: int
