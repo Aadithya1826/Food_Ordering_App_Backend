@@ -44,7 +44,7 @@ app.add_middleware(
         "http://dev-ui.dataudipi.com",
         "https://dev-ui.dataudipi.com"
     ],
-    allow_origin_regex="https://.*\\.dataudipi\\.com", # restrict to dataudipi domains instead of trycloudflare
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

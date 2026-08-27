@@ -5,7 +5,6 @@ import edge_tts
 import json
 from gtts import gTTS
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..utils.dependencies import get_current_user, get_db
@@ -254,7 +253,9 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
         else: voice = 'en-IN-PrabhatNeural' # Indian English Male
 
     try:
-        communicate = edge_tts.Communicate(text, voice)
+        # +10% rate makes the TTS sound much more like a brisk, natural human conversation 
+        # instead of a slow, robotic news-reader.
+        communicate = edge_tts.Communicate(text, voice, rate="+10%", pitch="+0Hz")
         audio_data = b""
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -265,7 +266,7 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
         # Fallback to English Male if selected language fails
         if voice != 'en-IN-PrabhatNeural':
             try:
-                communicate = edge_tts.Communicate(text, 'en-IN-PrabhatNeural')
+                communicate = edge_tts.Communicate(text, 'en-IN-PrabhatNeural', rate="+10%", pitch="+0Hz")
                 audio_data = b""
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
@@ -276,7 +277,7 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
         return None
 
 
-@router.post("/api/v1/public/mcp/customer-chat")
+@router.post("/api/v1/public/mcp/customer-chat", response_model=MCPVoiceResponse)
 async def customer_chat(
     request: CustomerMCPRequest,
     db: Session = Depends(get_db),
@@ -284,7 +285,7 @@ async def customer_chat(
     """
     Public (no-auth) endpoint for the customer UI chatbot.
     Supports text and audio (MediaRecorder audio/webm) input.
-    Returns Server-Sent Events (SSE) streaming JSON tokens.
+    Returns assistant_text + optional base64 gTTS audio payload.
     """
     # Fetch menu to inject into prompt to prevent hallucination
     from ..models.menu import MenuItem, MenuCategory
@@ -335,60 +336,106 @@ async def customer_chat(
         "Respond with valid JSON only."
     )
 
-    async def _stream_customer_chat():
-        full_text = ""
-        try:
-            async for chunk in client.generate_json_stream(
-                full_prompt,
-                audio_base64=request.audio_base64
-            ):
-                full_text += chunk
-                yield f"data: {json.dumps({'type': 'llm_chunk', 'chunk': chunk})}\n\n"
-        except Exception as e:
-            print(f"[CustomerChat] Gemini streaming error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    # --- Call Gemini (with optional audio) ---
+    try:
+        parsed = await client.generate_json(
+            full_prompt,
+            audio_base64=request.audio_base64
+        )
+    except Exception as e:
+        print(f"[CustomerChat] Gemini error: {e}")
+        error_msg = str(e)
+        if "429" in error_msg:
+            fallback = "I'm sorry, the AI service is busy right now. Please try again in a moment."
+        elif "503" in error_msg:
+            fallback = "I'm sorry, the AI service is temporarily unavailable. Please try again later."
+        else:
+            fallback = "Sorry, I couldn't understand that. Could you please try again?"
+        return MCPVoiceResponse(
+            assistant_text=fallback,
+            tool_name=None,
+            tool_result=None,
+            audio_payload=await _generate_tts_audio(fallback) if request.is_voice else None
+        )
 
-        parsed = client._try_parse_json(full_text)
-        if not parsed:
-            parsed = {}
+    tool_name = parsed.get("tool_name")
+    
+    # Debug log
+    try:
+        import json
+        with open(r"C:\Users\solai\.gemini\antigravity-ide\brain\45a5a374-3741-46da-816b-0c0dbece4cef\scratch\parsed.log", "a") as f:
+            f.write(f"PROMPT: {request.prompt}\nPARSED: {json.dumps(parsed)}\n\n")
+    except Exception as e:
+        print("Logging error:", e)
 
-        transcribed = parsed.get("transcribed_user_text")
-        if transcribed:
-            yield f"data: {json.dumps({'type': 'transcription', 'text': transcribed})}\n\n"
-
-        ui_actions = parsed.get("ui_actions", [])
-        if ui_actions:
-            yield f"data: {json.dumps({'type': 'ui_actions', 'actions': ui_actions})}\n\n"
-
-        assistant_text = parsed.get("assistant_text", "")
+    assistant_text = parsed.get("assistant_text", "")
+    if isinstance(assistant_text, str):
+        assistant_text = assistant_text.strip()
+    else:
+        assistant_text = ""
         
-        # Determine fallback if empty
-        if not assistant_text:
-            action_types = [a.get("action") for a in ui_actions if isinstance(a, dict)]
-            if "add_to_cart" in action_types:
-                assistant_text = "Okay, I've updated your order. Anything else?"
-            elif "navigate" in action_types:
-                assistant_text = "Sure, taking you there now."
-            elif "view_cart" in action_types:
-                assistant_text = "Here is your cart."
-            elif "trigger_checkout" in action_types:
-                assistant_text = "Let me show you your order."
-            elif "set_customer" in action_types:
-                assistant_text = "Got it, I've updated your details. What's next?"
-            elif "set_table_number" in action_types:
-                assistant_text = "Table number confirmed."
-            elif "set_order_type" in action_types:
-                assistant_text = "Got it."
-            elif action_types:
-                assistant_text = "Okay, got it."
-            else:
-                assistant_text = "I'm sorry, I didn't quite catch that. How can I help you today?"
+    transcribed_user_text = parsed.get("transcribed_user_text", None)
+    params = parsed.get("params", {}) or {}
+    ui_actions = parsed.get("ui_actions") or []
 
-        if assistant_text and request.is_voice:
-            audio = await _generate_tts_audio(assistant_text, request.detected_language)
-            if audio:
-                yield f"data: {json.dumps({'type': 'audio', 'payload': audio})}\n\n"
-                
-        yield "data: [DONE]\n\n"
+    # --- Execute tool if requested ---
+    tool_result = None
+    if tool_name and tool_name in CUSTOMER_TOOL_REGISTRY:
+        try:
+            handler = CUSTOMER_TOOL_REGISTRY[tool_name]["handler"]
+            # Public handlers take (db, **params) — no user object
+            tool_result = handler(db, **params)
 
-    return StreamingResponse(_stream_customer_chat(), media_type="text/event-stream")
+            # --- Second pass: summarize tool result in natural language ---
+            followup_prompt = (
+                f"{build_customer_tool_prompt(is_voice=request.is_voice, is_followup=True, menu_text=menu_text, order_id=request.order_id, current_page=request.current_page, order_type=request.order_type, cart_data=request.cart_data, customer_name=request.customer_name, customer_phone=request.customer_phone)}\n\n"
+                f"The customer asked: {transcribed_user_text or request.prompt}\n"
+                f"You used the tool '{tool_name}' and got this result:\n{tool_result}\n\n"
+                "Give a natural, conversational answer summarizing this data. "
+                "Return JSON with ONLY the key: 'assistant_text'."
+            )
+            try:
+                second = await client.generate_json(followup_prompt)
+                if "assistant_text" in second:
+                    assistant_text = second["assistant_text"]
+            except Exception as e2:
+                print(f"[CustomerChat] Follow-up error: {e2}")
+
+        except Exception as tool_err:
+            print(f"[CustomerChat] Tool execution error: {tool_err}")
+            assistant_text = assistant_text or "I couldn't retrieve that information right now. Please try again."
+
+    if assistant_text:
+        final_text = assistant_text
+    else:
+        action_types = [a.get("action") for a in ui_actions if isinstance(a, dict)]
+        if "add_to_cart" in action_types:
+            final_text = "Okay, I've updated your order. Anything else?"
+        elif "navigate" in action_types:
+            final_text = "Sure, taking you there now."
+        elif "view_cart" in action_types:
+            final_text = "Here is your cart."
+        elif "trigger_checkout" in action_types:
+            final_text = "Let me show you your order."
+        elif "set_customer" in action_types:
+            final_text = "Got it, I've updated your details. What's next?"
+        elif "set_table_number" in action_types:
+            final_text = "Table number confirmed."
+        elif "set_order_type" in action_types:
+            final_text = "Got it."
+        elif "set_flow_stage" in action_types:
+            final_text = "Okay, let's proceed."
+        elif action_types:
+            final_text = "Okay, got it."
+        else:
+            final_text = "I'm sorry, I didn't quite catch that. How can I help you today?"
+
+    return MCPVoiceResponse(
+        assistant_text=final_text,
+        transcribed_user_text=transcribed_user_text,
+        tool_name=None,           # chatbot never calls DB tools
+        tool_result=None,
+        parameters=params,
+        ui_actions=ui_actions,
+        audio_payload=await _generate_tts_audio(final_text, request.detected_language) if request.is_voice else None,
+    )

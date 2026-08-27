@@ -13,6 +13,19 @@ class OrderStatus(str, enum.Enum):
     SERVED = "SERVED"
     CANCELLED = "CANCELLED"
 
+class DeliveryAddress(Base):
+    __tablename__ = "delivery_addresses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    restaurant_id = Column(Integer, index=True)
+    name = Column(String)
+    phone = Column(String)
+    address_line = Column(String)
+    city = Column(String)
+    pincode = Column(String)
+    
+    orders = relationship("Order", back_populates="delivery_address")
+
 class Order(Base):
     __tablename__ = "orders"
 
@@ -20,6 +33,8 @@ class Order(Base):
     restaurant_id = Column(Integer, index=True, nullable=True)
     table_id = Column(String, ForeignKey("tables.id"), index=True, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
+    order_type = Column(String, default="DINE_IN", index=True) # DINE_IN, TAKEAWAY, DELIVERY
+    delivery_address_id = Column(Integer, ForeignKey("delivery_addresses.id"), nullable=True)
     status = Column(String, index=True, nullable=True)
     payment_method = Column(String, nullable=True)
     payment_status = Column(String, nullable=True)
@@ -40,6 +55,7 @@ class Order(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     table = relationship("Table", back_populates="orders")
+    delivery_address = relationship("DeliveryAddress", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
 
 

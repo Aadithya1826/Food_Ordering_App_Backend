@@ -205,11 +205,18 @@ class PosCartItem(BaseModel):
 
 class PosOrderPayload(BaseModel):
     table_number: str = "takeaway"
+    order_type: str = "DINE_IN"
     payment_method: str = "Cash"
     cart: List[PosCartItem] = []
     total_amount: float = 0
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    delivery_address: Optional[str] = None
+    delivery_city: Optional[str] = None
+    delivery_pincode: Optional[str] = None
 
 from ..models.table import Table
+from ..models.order import DeliveryAddress
 
 @router.post("/api/v1/orders", response_model=dict)
 def create_pos_order(
@@ -228,9 +235,13 @@ def create_pos_order(
             not payload.table_number or 
             payload.table_number.lower().replace(" ", "").replace("-", "") == "takeaway"
         )
-        if is_takeaway:
-            table_id = None
-        else:
+        
+        order_type = payload.order_type.upper()
+        if order_type not in ["DINE_IN", "TAKEAWAY", "DELIVERY"]:
+            order_type = "TAKEAWAY" if is_takeaway else "DINE_IN"
+
+        table_id = None
+        if order_type == "DINE_IN":
             base_num = payload.table_number.replace("T-", "").replace("t-", "").strip()
             table = db.query(Table).filter(
                 (Table.table_number == payload.table_number) |
@@ -245,12 +256,29 @@ def create_pos_order(
                 db.refresh(table)
             table_id = table.id
 
+        delivery_address_id = None
+        if order_type == "DELIVERY":
+            address = DeliveryAddress(
+                restaurant_id=res_id,
+                name=payload.customer_name or "",
+                phone=payload.customer_phone or "",
+                address_line=payload.delivery_address or "",
+                city=payload.delivery_city or "",
+                pincode=payload.delivery_pincode or ""
+            )
+            db.add(address)
+            db.commit()
+            db.refresh(address)
+            delivery_address_id = address.id
+
         status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
         payment_status = "Paid" if payload.payment_method.lower() in ["cash", "upi", "card"] else "Pending"
 
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
+            order_type=order_type,
+            delivery_address_id=delivery_address_id,
             user_id=user.id,
             total_amount=payload.total_amount,
             status=status,
