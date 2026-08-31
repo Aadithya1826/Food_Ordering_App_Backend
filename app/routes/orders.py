@@ -208,6 +208,7 @@ class PosOrderPayload(BaseModel):
     payment_method: str = "Cash"
     cart: List[PosCartItem] = []
     total_amount: float = 0
+    timestamp: Optional[str] = None
 
 from ..models.table import Table
 
@@ -257,6 +258,16 @@ def create_pos_order(
             payment_status=payment_status,
             payment_method=payload.payment_method
         )
+        
+        if payload.timestamp:
+            try:
+                from datetime import datetime
+                ts = payload.timestamp.replace('Z', '+00:00')
+                dt = datetime.fromisoformat(ts)
+                new_order.created_at = dt.replace(tzinfo=None)
+            except Exception:
+                pass
+                
         db.add(new_order)
         db.commit()
         db.refresh(new_order)
