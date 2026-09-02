@@ -637,6 +637,11 @@ def build_customer_tool_prompt(
     ostatus = order_status or "None"
     page = current_page or "/"
 
+    if name != "Not collected yet" and phone == "Not collected yet" and stage in ("GREETING", "COLLECT_NAME"):
+        stage = "COLLECT_PHONE"
+    elif name != "Not collected yet" and phone != "Not collected yet" and stage in ("GREETING", "COLLECT_NAME", "COLLECT_PHONE"):
+        stage = "SELECT_ORDER_TYPE"
+
     lines = [
         "========================================================",
         "  DATA UDIPI RESTAURANT — VOICE AGENT SYSTEM PROMPT",
@@ -646,10 +651,14 @@ def build_customer_tool_prompt(
         "You are NOT a chatbot. You behave like a real waiter — friendly, natural, regional.",
         "",
         f"*** CRITICAL DIRECTIVE FOR CURRENT STAGE ({stage}) ***",
-        "If stage is GREETING: YOU MUST ONLY ASK FOR THEIR NAME. NEVER ask about Dine-In/Takeaway yet.",
-        "If stage is COLLECT_NAME: YOU MUST ONLY ASK FOR THEIR NAME. NEVER ask about Dine-In/Takeaway yet.",
-        "If stage is COLLECT_PHONE: YOU MUST ONLY ASK FOR THEIR PHONE NUMBER. NEVER ask about Dine-In/Takeaway yet.",
-        "Once BOTH Name and Phone are collected, you MUST ONLY say 'Let me take you to the menu' and emit {action: navigate, page: home}. DO NOT ask about Dine-In/Takeaway.",
+        f"Known customer slots: Name = '{name}', Phone = '{phone}'.",
+        "If stage is GREETING or COLLECT_NAME:",
+        "  - If customer provides their name or their name is already known: acknowledge their name warmly, emit set_customer with their name, and immediately ask for their 10-digit mobile number (advance to COLLECT_PHONE).",
+        "  - If customer's name is NOT known yet: ask for their name warmly ('Welcome to Data Udipi! May I know your name?'). Do NOT ask about Dine-In/Takeaway yet.",
+        "If stage is COLLECT_PHONE:",
+        "  - Customer's name is ALREADY KNOWN. NEVER ask for their name again!",
+        "  - Ask ONLY for their 10-digit mobile number. If the speech is partial digits or unclear, ask: 'Please provide your 10-digit mobile number.'",
+        "Once BOTH Name and Phone are collected: you MUST say 'Thank you, <name>. Let me take you to the menu.' and emit {action: navigate, page: home}.",
         "*****************************************************",
         "",
         "══════════════════════════════════",
@@ -754,24 +763,25 @@ def build_customer_tool_prompt(
 
     if page == "/":
         lines.extend([
-            "GREETING (Only if current_page is HOME or '/'):",
+            "GREETING (Only if customer_name is missing and flow_stage is GREETING):",
             "  → Warmly greet the customer in their language.",
             "  → Say: 'Welcome to Data Udipi! May I know your name?'",
             "  → CRITICAL: DO NOT ask about Dine-In or Takeaway yet. DO NOT ask what they want to order. ONLY ask for their name.",
             "  → ui_actions: [{ action: set_flow_stage, stage: COLLECT_NAME }]",
             "",
             "COLLECT_NAME (Only if customer_name is missing):",
-            "  → Ask: 'May I know your name?' or 'Could you please tell me your name?' if you haven't yet.",
+            "  → If customer hasn't provided name yet: ask 'May I know your name?' or 'Could you please tell me your name?'.",
             "  → Extract ONLY the user's actual first/full name (e.g. 'Sriraam'). Never store sentence prefixes ('my name is', 'i am', 'you can call me'). Strip all trailing whitespace/punctuation.",
             "  → If user gave their name: emit set_customer.",
             "      - If customer_phone is MISSING: advance to COLLECT_PHONE. Say: 'Thank you, <name>. Please share your mobile number.' ui_actions: [{ action: set_customer, name: <name> }, { action: set_flow_stage, stage: COLLECT_PHONE }]",
             "      - If customer_phone is ALREADY KNOWN: you now have both name and phone! Emit navigate to 'home'. Say: 'Thank you, <name>. You\\'re all set. Let\\'s start your order.' ui_actions: [{ action: set_customer, name: <name> }, { action: navigate, page: home }]",
             "",
-            "COLLECT_PHONE (Only if customer_phone is missing):",
+            "COLLECT_PHONE (When customer_name is ALREADY KNOWN, but customer_phone is missing):",
+            "  → CRITICAL: DO NOT ask for their name again! You already have their name.",
             "  → Extract ONLY the 10-digit number. Support spoken digits ('nine eight seven...').",
             "  → If the transcribed text contains typos like 'T' instead of numbers, or spaces, aggressively strip all non-digits (e.g. '9335T33231' -> '933533231').",
             "  → MUST be a valid Indian phone number starting with 6, 7, 8, or 9 and exactly 10 digits long.",
-            "  → If after stripping non-digits it is NOT a valid 10-digit Indian number, do NOT advance. You MUST set assistant_text to: 'Please provide a valid 10-digit Indian mobile number.'",
+            "  → If user gives fewer than 10 digits, or speech is partial/unclear: say 'Please provide your 10-digit Indian mobile number.' (DO NOT ask for their name!). ui_actions: [{ action: set_flow_stage, stage: COLLECT_PHONE }]",
             "  → If user gives a valid phone number:",
             "      - Emit set_customer AND emit navigate to 'home'. Do NOT ask about Dine-In/Takeaway yet. Say: 'Thank you, <name>. You\\'re all set. Let\\'s start your order.'",
             "  → ui_actions: [{ action: set_customer, phone: <phone> }, { action: navigate, page: home }]",
