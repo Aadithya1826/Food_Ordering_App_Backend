@@ -60,6 +60,7 @@ def get_live_orders(
             "payment_status": p_status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
+            "order_type": o.order_type,
             "items": items
         })
 
@@ -191,6 +192,7 @@ def get_all_orders(
             "payment_status": p_status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
+            "order_type": o.order_type,
             "items": items
         })
 
@@ -205,6 +207,7 @@ class PosCartItem(BaseModel):
 
 class PosOrderPayload(BaseModel):
     table_number: str = "takeaway"
+    order_type: Optional[str] = "DINE_IN"
     payment_method: str = "Cash"
     cart: List[PosCartItem] = []
     total_amount: float = 0
@@ -256,7 +259,8 @@ def create_pos_order(
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,
-            payment_method=payload.payment_method
+            payment_method=payload.payment_method,
+            order_type=payload.order_type.upper() if payload.order_type else "DINE_IN"
         )
         
         if payload.timestamp:
