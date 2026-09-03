@@ -5,6 +5,7 @@ Handles existing tables that need schema updates
 import sys
 sys.path.insert(0, '/home/aadithya-s/Desktop/Projects/Food_Ordering_App')
 
+# pyrefly: ignore [missing-import]
 from backend.app.db import engine
 from sqlalchemy import inspect, text
 

@@ -281,8 +281,12 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int = 1, db: Sessi
                 db.refresh(table)
             table_id = table.id
 
-        status = "CONFIRMED" if payload.payment_method in ["Razorpay", "UPI"] else "PENDING"
-        payment_status = "Paid" if payload.payment_method in ["Razorpay", "UPI"] else "Pending"
+        is_digital = payload.payment_method in ["Razorpay", "UPI"]
+        is_delivery_cash = ((payload.order_type or "DINE_IN").upper() == "DELIVERY" and payload.payment_method == "Cash")
+        is_paid = is_digital or is_delivery_cash
+
+        status = "CONFIRMED" if is_paid else "PENDING"
+        payment_status = "Paid" if is_paid else "Pending"
 
         new_order = Order(
             restaurant_id=restaurant_id,
@@ -290,7 +294,9 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int = 1, db: Sessi
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,
-            payment_method=payload.payment_method
+            payment_method=payload.payment_method,
+            order_type=payload.order_type if payload.order_type else "DINE_IN",
+            delivery_address_id=payload.delivery_address_id
         )
         db.add(new_order)
         db.commit()

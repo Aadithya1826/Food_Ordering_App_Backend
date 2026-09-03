@@ -14,6 +14,7 @@ class MenuCategoryResponse(MenuCategoryCreate):
 
 class MenuItemCreate(BaseModel):
     item_code: Optional[str] = None
+    ac_type: Optional[str] = "Both"
     name: str
     description: Optional[str] = None
     price: float
@@ -31,6 +32,7 @@ class MenuItemResponse(MenuItemCreate):
 
 class MenuItemUpdate(BaseModel):
     item_code: Optional[str] = None
+    ac_type: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     price: Optional[float] = None
