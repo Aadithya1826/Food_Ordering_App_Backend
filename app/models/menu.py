@@ -31,3 +31,16 @@ class MenuItem(Base):
     image_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     category = relationship("MenuCategory", back_populates="items")
+
+class CateringOrderMenu(Base):
+    __tablename__ = "catering_order_menu"
+
+    id = Column(Integer, primary_key=True, index=True)
+    restaurant_id = Column(Integer, index=True, nullable=True)
+    name = Column(String, index=True)
+    code = Column(String, index=True, nullable=True)
+    description = Column(Text, nullable=True)
+    price = Column(Float)
+    minimum_order_quantity = Column(Integer, default=50)
+    is_available = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -3,9 +3,10 @@ import os
 import uuid
 import shutil
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from ..db import SessionLocal
-from ..models.menu import MenuItem, MenuCategory
-from ..schemas.menu import MenuItemCreate, MenuItemResponse, MenuItemUpdate, MenuCategoryResponse
+from ..models.menu import MenuItem, MenuCategory, CateringOrderMenu
+from ..schemas.menu import MenuItemCreate, MenuItemResponse, MenuItemUpdate, MenuCategoryResponse, CateringOrderMenuCreate, CateringOrderMenuResponse, CateringOrderMenuUpdate
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id
 
@@ -263,3 +264,99 @@ def upload_menu_image(
         shutil.copyfileobj(file.file, buffer)
         
     return {"image_url": f"/static/images/{filename}"}
+# GET catering menus
+@router.get("/api/v1/catering", response_model=list[CateringOrderMenuResponse])
+def get_catering_menus(
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+    restaurant_id = resolve_restaurant_id(user, restaurant_id)
+
+    query = db.query(CateringOrderMenu)
+    if restaurant_id is not None:
+        query = query.filter(
+            or_(
+                CateringOrderMenu.restaurant_id == restaurant_id,
+                CateringOrderMenu.restaurant_id.is_(None)
+            )
+        )
+
+    return query.all()
+
+# POST catering menu
+@router.post("/api/v1/catering", response_model=CateringOrderMenuResponse)
+def create_catering_menu(
+    data: CateringOrderMenuCreate,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    
+    item_data = data.model_dump()
+    if user.role == "HOTEL_ADMIN":
+        if item_data.get("restaurant_id") is not None and item_data["restaurant_id"] != user.restaurant_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Hotel admin can only create items for restaurant {user.restaurant_id}"
+            )
+        item_data["restaurant_id"] = user.restaurant_id
+
+    item = CateringOrderMenu(**item_data)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+# PATCH catering menu
+@router.patch("/api/v1/catering/{menu_id}", response_model=CateringOrderMenuResponse)
+def update_catering_menu(
+    menu_id: int,
+    data: CateringOrderMenuUpdate,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    
+    item = db.query(CateringOrderMenu).filter(CateringOrderMenu.id == menu_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Catering menu not found")
+
+    if user.role == "HOTEL_ADMIN" and item.restaurant_id is not None and item.restaurant_id != user.restaurant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied"
+        )
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(item, key, value)
+
+    db.commit()
+    db.refresh(item)
+    return item
+
+# DELETE catering menu
+@router.delete("/api/v1/catering/{menu_id}", status_code=204)
+def delete_catering_menu(
+    menu_id: int,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+
+    item = db.query(CateringOrderMenu).filter(CateringOrderMenu.id == menu_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Catering menu not found")
+
+    if user.role == "HOTEL_ADMIN" and item.restaurant_id is not None and item.restaurant_id != user.restaurant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied"
+        )
+
+    db.delete(item)
+    db.commit()
+    return None

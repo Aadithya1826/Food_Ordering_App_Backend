@@ -39,3 +39,29 @@ class MenuItemUpdate(BaseModel):
     quantity: Optional[int] = None
     is_available: Optional[bool] = None
     image_url: Optional[str] = None
+
+class CateringOrderMenuBase(BaseModel):
+    name: str
+    code: Optional[str] = None
+    price: float
+    description: Optional[str] = None
+    minimum_order_quantity: int = 50
+    restaurant_id: Optional[int] = None
+    is_available: bool = True
+
+class CateringOrderMenuResponse(CateringOrderMenuBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+class CateringOrderMenuCreate(CateringOrderMenuBase):
+    pass
+
+class CateringOrderMenuUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    price: Optional[float] = None
+    description: Optional[str] = None
+    minimum_order_quantity: Optional[int] = None
+    is_available: Optional[bool] = None
