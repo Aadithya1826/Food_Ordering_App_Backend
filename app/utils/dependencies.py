@@ -86,3 +86,41 @@ def get_current_rider(
         raise HTTPException(status_code=401, detail="Rider not found")
         
     return rider
+
+def get_current_customer(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Dependency function to get the current authenticated customer from JWT token
+    """
+    token = None
+    
+    # First, try to get token from Authorization header
+    if credentials:
+        token = credentials.credentials
+    # If not in header, try to get from cookie
+    elif "access_token" in request.cookies:
+        token = request.cookies["access_token"]
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    from ..middleware.jwt_middleware import verify_jwt_token
+    payload = verify_jwt_token(token)
+    
+    if payload.get("account_type") != "CUSTOMER":
+        raise HTTPException(status_code=403, detail="Customer access required")
+        
+    customer_id = payload.get("user_id")
+    if not customer_id:
+        raise HTTPException(status_code=401, detail="Invalid customer token")
+        
+    from ..models.customer import Customer
+    customer = db.query(Customer).filter(Customer.id == int(customer_id)).first()
+    
+    if not customer:
+        raise HTTPException(status_code=401, detail="Customer not found")
+        
+    return customer

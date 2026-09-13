@@ -60,7 +60,6 @@ def get_live_orders(
             "payment_status": p_status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
-            "order_type": o.order_type,
             "items": items
         })
 
@@ -83,6 +82,10 @@ def update_status(
     require_restaurant_access(user, order.restaurant_id)
     order.status = data.status
     
+    # Sync delivery assignment & status if this is a delivery order
+    from ..services.delivery_status import sync_order_delivery_on_status_change
+    sync_order_delivery_on_status_change(db, order, data.status)
+
     # Auto-release table if order is completed or cancelled
     if data.status in ["COMPLETED", "CANCELLED"] and order.table_id:
         from ..models.table import Table
@@ -192,7 +195,6 @@ def get_all_orders(
             "payment_status": p_status,
             "total_amount": o.total_amount,
             "created_at": o.created_at,
-            "order_type": o.order_type,
             "items": items
         })
 

@@ -1,10 +1,13 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.order import Order
 from ..models.delivery import DeliveryPartner, DeliveryAssignment, RiderLocation, DeliveryStatusHistory
 from ..models.restaurant import Restaurant
 from ..utils.dependencies import get_current_rider
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -183,6 +186,16 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         for r in timeline_records
     ]
 
+    assignment_data = None
+    if assignment:
+        assignment_data = {
+            "id": assignment.id,
+            "status": assignment.status,
+            "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
+            "picked_up_at": assignment.picked_up_at.isoformat() if assignment.picked_up_at else None,
+            "delivered_at": assignment.delivered_at.isoformat() if assignment.delivered_at else None,
+        }
+
     # Delivery address — gracefully handle Order models that don't have these columns yet
     address_data = None
     delivery_address_snapshot = getattr(order, "delivery_address_snapshot", None)
@@ -202,6 +215,7 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         "order_id": order.id,
         "order_status": order.status,
         "delivery_status": delivery_status,
+        "assignment": assignment_data,
         "restaurant": {
             "id": restaurant.id if restaurant else None,
             "name": restaurant.name if restaurant else "Restaurant",

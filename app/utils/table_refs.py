@@ -45,6 +45,10 @@ def build_table_number_map(db: Session, orders: Iterable[Any]) -> dict[int, str]
 
 
 def resolve_order_table_number(order: Any, table_number_map: dict[int, str]) -> str:
+    order_type = getattr(order, "order_type", None)
+    if order_type and str(order_type).upper() == "DELIVERY":
+        return "Delivery"
+
     raw_table_id = getattr(order, "table_id", None)
 
     if is_takeaway_table_reference(raw_table_id):

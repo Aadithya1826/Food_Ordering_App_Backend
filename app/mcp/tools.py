@@ -316,6 +316,8 @@ def update_order_status(db: Session, user, order_id: int, status: str) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of {valid_statuses}")
         
     order.status = status.upper()
+    from ..services.delivery_status import sync_order_delivery_on_status_change
+    sync_order_delivery_on_status_change(db, order, status.upper())
     db.commit()
     
     return {
@@ -1032,6 +1034,14 @@ def build_tool_prompt(user, is_voice: bool = False, is_followup: bool = False) -
         lines.append(f"Whenever a tool requires or accepts a restaurant_id, you should assume or explicitly use restaurant ID {user.restaurant_id}.")
     else:
         lines.append("You are speaking with a staff member with limited access.")
+
+    # Delivery Workflow Rules
+    lines.append("DELIVERY WORKFLOW RULES:")
+    lines.append("1. You are handling the **Delivery workflow only** when managing delivery orders. Do not mix with Dine-In or Takeaway flows.")
+    lines.append("2. When a new Delivery order is confirmed, use `assign_delivery_rider` to create a record in `delivery_assignments` linking `order_id` and the chosen `rider_id`.")
+    lines.append("3. Accept the rider ID explicitly provided by the manager. The tool will ensure the rider is active, online, and available. Do not auto-assign unless instructed.")
+    lines.append("4. Use `update_delivery_assignment_status` to update the assignment status as the workflow progresses (ACCEPTED, PICKED_UP, OUT_FOR_DELIVERY, DELIVERED).")
+    lines.append("5. On successful assignment, confirm the rider name and phone linked to the order to the manager.")
 
     if not is_followup:
         lines.append("Available tools:")
