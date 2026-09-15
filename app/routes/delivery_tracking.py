@@ -200,7 +200,13 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
     address_data = None
     delivery_address_snapshot = getattr(order, "delivery_address_snapshot", None)
     if delivery_address_snapshot:
+        import json as _json
         snap = delivery_address_snapshot
+        if isinstance(snap, str):
+            try:
+                snap = _json.loads(snap)
+            except Exception:
+                snap = {}
         address_data = {
             "id": getattr(order, "delivery_address_id", None),
             "full_address": snap.get("full_address", getattr(order, "delivery_address", None)),

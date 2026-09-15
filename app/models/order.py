@@ -29,6 +29,7 @@ class Order(Base):
     discount_code = Column(String, nullable=True)
     
     # Delivery and Advanced Order Fields
+    delivery_address_id = Column(Integer, nullable=True)
     delivery_address_snapshot = Column(String, nullable=True)  # JSON stored as text
     delivery_instructions = Column(String, nullable=True)
     delivery_status = Column(String, nullable=True)

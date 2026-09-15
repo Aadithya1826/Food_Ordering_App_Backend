@@ -30,7 +30,7 @@ class DeliveryAssignment(Base):
 
     id = Column(BigInteger, primary_key=True, index=True)
     order_id = Column(BigInteger, ForeignKey("orders.id"), index=True)
-    rider_id = Column(BigInteger, ForeignKey("delivery_partners.id"), index=True)
+    rider_id = Column(BigInteger, ForeignKey("delivery_partners.id"), index=True, nullable=True)
     status = Column(String(40), index=True)
     assigned_at = Column(DateTime, default=datetime.utcnow)
     accepted_at = Column(DateTime, nullable=True)

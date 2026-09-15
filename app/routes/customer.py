@@ -5,8 +5,11 @@ from ..models.menu import MenuCategory, MenuItem
 from ..models.restaurant import Restaurant
 from ..models.order import Order, OrderItem
 from ..models.table import Table
+from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory
+from ..models.customer import CustomerAddress
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import json
 import os
 from datetime import datetime
 import hmac
@@ -424,11 +427,11 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 if not table:
                     table = Table(table_number=payload.table_number, restaurant_id=restaurant_id, capacity=4, status="Occupied")
                     db.add(table)
-                    db.commit()
+                    db.flush()
                     db.refresh(table)
                 else:
                     table.status = "Occupied"
-                    db.commit()
+                    db.flush()
                 table_id = table.id
 
         norm_method = (payload.payment_method or "").lower().replace(" ", "").replace("_", "")
@@ -460,14 +463,15 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 
             # Verify ownership if possible (assuming payload has customer identity or it's checked earlier)
             # We trust the db address completely
-            delivery_snapshot = {
+            import json
+            delivery_snapshot = json.dumps({
                 "full_address": addr_db.full_address,
                 "latitude": addr_db.latitude,
                 "longitude": addr_db.longitude,
                 "contact_name": addr_db.contact_name,
                 "contact_phone": addr_db.contact_phone,
                 "delivery_instructions": addr_db.delivery_instructions or payload.delivery_instructions
-            }
+            })
             
             try:
                 from ..models.order import DeliveryAddress as DelivAddrModel
@@ -520,7 +524,7 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             discount_code=payload.discount_code,
         )
         db.add(new_order)
-        db.commit()
+        db.flush()
         db.refresh(new_order)
 
         for item_id, qty, price in validated_items:
@@ -531,45 +535,30 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 price=price
             )
             db.add(order_item)
-        
-        # If Delivery Order, automatically assign to online rider if available or log initial history
+
+        # If Delivery Order, create an UNASSIGNED delivery assignment.
+        # Riders will pick this up from the /api/v1/rider/available-orders endpoint.
         if is_delivery:
-            online_rider = db.query(DeliveryPartner).filter(
-                DeliveryPartner.is_online == True,
-                DeliveryPartner.is_available == True,
-                DeliveryPartner.is_active == True
-            ).first()
-
-            rider_id = online_rider.id if online_rider else None
-            assignment_id = None
-
-            if rider_id:
-                assignment = DeliveryAssignment(
-                    order_id=new_order.id,
-                    rider_id=rider_id,
-                    status="ASSIGNED",
-                    assigned_at=datetime.utcnow()
-                )
-                db.add(assignment)
-                db.commit()
-                db.refresh(assignment)
-                assignment_id = assignment.id
-                new_order.delivery_status = "RIDER_ASSIGNED"
-
-                # Record initial assignment history
-                lat_val = delivery_snapshot.get("latitude") if delivery_snapshot else None
-                lng_val = delivery_snapshot.get("longitude") if delivery_snapshot else None
-                history = DeliveryStatusHistory(
-                    order_id=new_order.id,
-                    delivery_assignment_id=assignment_id,
-                    rider_id=rider_id,
-                    status="RIDER_ASSIGNED",
-                    latitude=lat_val,
-                    longitude=lng_val,
-                    notes="Delivery order assigned to rider with customer GPS location"
-                )
-                db.add(history)
-                db.commit()
+            import json as _json
+            unassigned = DeliveryAssignment(
+                order_id=new_order.id,
+                rider_id=None,
+                status="UNASSIGNED",
+                assigned_at=datetime.utcnow()
+            )
+            db.add(unassigned)
+            new_order.delivery_status = "RIDER_SEARCHING"
+            history = DeliveryStatusHistory(
+                order_id=new_order.id,
+                delivery_assignment_id=None,
+                rider_id=None,
+                status="RIDER_SEARCHING",
+                latitude=_json.loads(delivery_snapshot).get("latitude") if delivery_snapshot else None,
+                longitude=_json.loads(delivery_snapshot).get("longitude") if delivery_snapshot else None,
+                notes="Delivery order created, searching for available rider"
+            )
+            db.add(history)
+            db.commit()
 
         return {
             "success": True,
@@ -581,7 +570,10 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         }
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        import logging
+        logging.error(f"Order placement failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="An error occurred while placing your order. Please try again.")
+
 
 @router.post("/api/orders/{order_id}/settle-payment")
 def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Session = Depends(get_db)):
@@ -762,6 +754,7 @@ def get_public_active_order_for_table(table_number: str, restaurant_id: int = 1,
     table = db.query(Table).filter(Table.table_number.ilike(f"%{clean_table}%"), Table.restaurant_id == restaurant_id).first()
     
     query = db.query(Order).filter(Order.restaurant_id == restaurant_id)
+    # pyrefly: ignore [missing-import]
     from sqlalchemy import cast, String
     if table:
         query = query.filter(cast(Order.table_id, String) == str(table.id))
@@ -885,7 +878,7 @@ def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depend
         "table_number": resolve_order_table_number(order, table_number_map),
         "order_type": getattr(order, "order_type", "DINE_IN"),
         "delivery_status": getattr(order, "delivery_status", None),
-        "delivery_address": getattr(order, "delivery_address_snapshot", {}),
+        "delivery_address": json.loads(order.delivery_address_snapshot) if isinstance(getattr(order, "delivery_address_snapshot", None), str) else getattr(order, "delivery_address_snapshot", {}),
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,
@@ -952,7 +945,7 @@ def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session
                 "table_number": resolve_order_table_number(order, table_number_map),
                 "order_type": getattr(order, "order_type", "DINE_IN"),
                 "delivery_status": getattr(order, "delivery_status", None),
-                "delivery_address": getattr(order, "delivery_address_snapshot", {}),
+                "delivery_address": json.loads(order.delivery_address_snapshot) if isinstance(getattr(order, "delivery_address_snapshot", None), str) else getattr(order, "delivery_address_snapshot", {}),
                 "status": order.status,
                 "payment_method": order.payment_method,
                 "payment_status": order.payment_status,
@@ -1139,7 +1132,10 @@ def get_customer_recommendations(
     
     # Pre-fetch all necessary menu items to build frontend-ready objects
     all_needed_ids = set(favorite_ids) | set(popular_item_ids) | set(freq_item_ids)
-    menu_items = db.query(MenuItem).filter(MenuItem.id.in_(all_needed_ids)).all()
+    if all_needed_ids:
+        menu_items = db.query(MenuItem).filter(MenuItem.id.in_(all_needed_ids)).all()
+    else:
+        menu_items = []
     menu_map = {m.id: m for m in menu_items}
     
     def build_item_dict(m: MenuItem, reason: str):
