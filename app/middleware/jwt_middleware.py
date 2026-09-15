@@ -25,7 +25,7 @@ def verify_jwt_token(token: str) -> dict:
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("user_id")
+        user_id = payload.get("user_id") or payload.get("sub") or payload.get("id")
         
         if not user_id:
             raise HTTPException(
@@ -33,7 +33,11 @@ def verify_jwt_token(token: str) -> dict:
                 detail="Invalid token: missing user_id",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+            
+        # Normalize payload so downstream code can safely rely on user_id
+        if "user_id" not in payload:
+            payload["user_id"] = user_id
+            
         return payload
         
     except JWTError as e:

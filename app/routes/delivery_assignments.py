@@ -54,6 +54,7 @@ def create_assignment(payload: AssignmentCreate, db: Session = Depends(get_db)):
 
 @router.get("/api/v1/delivery/orders/available")
 def get_available_orders(db: Session = Depends(get_db)):
+    from ..models.restaurant import Restaurant
     # Find orders of type Delivery that are CONFIRMED or PREPARING
     # and do NOT have an active DeliveryAssignment
     active_assignments = db.query(DeliveryAssignment.order_id).filter(
@@ -62,12 +63,14 @@ def get_available_orders(db: Session = Depends(get_db)):
     
     available_orders = db.query(Order).filter(
         Order.order_type == "DELIVERY",
-        Order.status.in_(["PENDING", "CONFIRMED", "PREPARING"]),
+        Order.status.in_(["PENDING", "CONFIRMED", "PREPARING", "READY"]),
         ~Order.id.in_(active_assignments)
     ).order_by(Order.created_at.desc()).all()
     
     result = []
     for o in available_orders:
+        snap = o.delivery_address_snapshot or {}
+        rest = db.query(Restaurant).filter(Restaurant.id == o.restaurant_id).first()
         result.append({
             "id": o.id,
             "display_id": f"ORD-{str(o.id).zfill(6)}",
@@ -75,7 +78,25 @@ def get_available_orders(db: Session = Depends(get_db)):
             "status": o.status,
             "customer_phone": o.customer_phone,
             "created_at": o.created_at,
-            "delivery_address": o.delivery_address_snapshot
+            "delivery_address": snap,
+            "customer": {
+                "name": snap.get("contact_name", "Customer"),
+                "phone": snap.get("contact_phone", o.customer_phone),
+                "address": snap.get("full_address", "Customer Delivery Address"),
+                "latitude": snap.get("latitude"),
+                "longitude": snap.get("longitude"),
+                "delivery_instructions": o.delivery_instructions or snap.get("delivery_instructions")
+            },
+            "restaurant": {
+                "id": rest.id if rest else 1,
+                "name": rest.name if rest else "Restaurant",
+                "address": rest.address if rest else "",
+                "latitude": rest.latitude if rest and rest.latitude else 13.0418,
+                "longitude": rest.longitude if rest and rest.longitude else 80.2341
+            },
+            "latitude": snap.get("latitude"),
+            "longitude": snap.get("longitude"),
+            "delivery_instructions": o.delivery_instructions
         })
     return result
 
