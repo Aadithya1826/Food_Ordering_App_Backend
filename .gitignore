@@ -1,14 +1,12 @@
 .env
+.env.*
+!.env.example
 node_modules/
 __pycache__/
 *.pyc
 *.pyo
 scratch/
-
 cloudflared.exe
-
 dataudipi.db
-
-.env
 cloudflared*
 *.db

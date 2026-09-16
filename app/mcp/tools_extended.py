@@ -468,5 +468,139 @@ EXTENDED_TOOLS = {
             "restaurant_id": "ID of the hotel to delete."
         },
         "handler": delete_restaurant,
+    },
+    "assign_delivery_rider": {
+        "description": "Assign a delivery order to a specific rider explicitly.",
+        "parameters": {
+            "order_id": "The ID of the delivery order to assign.",
+            "rider_id": "The ID of the delivery partner to assign."
+        },
+        "handler": lambda db, user, order_id, rider_id: assign_delivery_rider(db, user, order_id, rider_id)
+    },
+    "update_delivery_assignment_status": {
+        "description": "Update the status of a delivery assignment as the workflow progresses (ACCEPTED, PICKED_UP, OUT_FOR_DELIVERY, DELIVERED).",
+        "parameters": {
+            "order_id": "The ID of the delivery order.",
+            "status": "The new status of the assignment."
+        },
+        "handler": lambda db, user, order_id, status: update_delivery_assignment_status(db, user, order_id, status)
     }
 }
+
+from ..models.delivery import DeliveryPartner, DeliveryAssignment, DeliveryStatusHistory
+
+def update_delivery_assignment_status(db: Session, user, order_id: int, status: str) -> dict:
+    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+        
+    require_restaurant_access(user, order.restaurant_id)
+    
+    assignment = db.query(DeliveryAssignment).filter(
+        DeliveryAssignment.order_id == order.id,
+        DeliveryAssignment.status.notin_(["CANCELLED", "REJECTED", "FAILED"])
+    ).first()
+    
+    if not assignment:
+        raise HTTPException(404, "Active delivery assignment not found for this order")
+        
+    status = status.upper()
+    valid_statuses = ["ASSIGNED", "ACCEPTED", "ARRIVED_RESTAURANT", "PICKED_UP", "OUT_FOR_DELIVERY", "ARRIVED_CUSTOMER", "DELIVERED", "REJECTED", "FAILED", "CANCELLED"]
+    if status not in valid_statuses:
+        raise HTTPException(400, f"Invalid status. Must be one of {valid_statuses}")
+        
+    assignment.status = status
+    assignment.updated_at = datetime.utcnow()
+    
+    if status == "ACCEPTED":
+        assignment.accepted_at = datetime.utcnow()
+    elif status == "PICKED_UP":
+        assignment.picked_up_at = datetime.utcnow()
+        order.delivery_status = "RIDER_PICKED_UP"
+    elif status == "OUT_FOR_DELIVERY":
+        order.delivery_status = "RIDER_ON_THE_WAY"
+    elif status == "DELIVERED":
+        assignment.delivered_at = datetime.utcnow()
+        order.delivery_status = "DELIVERED"
+        order.status = "COMPLETED"
+    
+    db.commit()
+    
+    history = DeliveryStatusHistory(
+        order_id=order.id,
+        delivery_assignment_id=assignment.id,
+        rider_id=assignment.rider_id,
+        status=status
+    )
+    db.add(history)
+    db.commit()
+    
+    return {
+        "message": f"Delivery assignment for order {order_id} updated to {status}.",
+        "order_id": order_id,
+        "new_status": status
+    }
+
+def assign_delivery_rider(db: Session, user, order_id: int, rider_id: int) -> dict:
+    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+        
+    require_restaurant_access(user, order.restaurant_id)
+    
+    if order.order_type.upper() != "DELIVERY":
+        raise HTTPException(400, "Cannot assign rider to a non-delivery order")
+        
+    rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
+    if not rider:
+        raise HTTPException(404, "Rider not found")
+        
+    if not rider.is_active or not rider.is_online or not rider.is_available:
+        raise HTTPException(400, "Rider is not active, online, or available")
+        
+    # Check for existing active assignment
+    existing_assignment = db.query(DeliveryAssignment).filter(
+        DeliveryAssignment.order_id == order.id,
+        DeliveryAssignment.status.notin_(["CANCELLED", "REJECTED", "FAILED"])
+    ).first()
+    
+    if existing_assignment:
+        existing_assignment.rider_id = rider.id
+        existing_assignment.status = "ASSIGNED"
+        existing_assignment.assigned_at = datetime.utcnow()
+        assignment = existing_assignment
+    else:
+        assignment = DeliveryAssignment(
+            order_id=order.id,
+            rider_id=rider.id,
+            status="ASSIGNED",
+            assigned_at=datetime.utcnow()
+        )
+        db.add(assignment)
+        
+    db.commit()
+    db.refresh(assignment)
+    
+    # Log history
+    history = DeliveryStatusHistory(
+        order_id=order.id,
+        delivery_assignment_id=assignment.id,
+        rider_id=rider.id,
+        status="ASSIGNED"
+    )
+    db.add(history)
+    
+    # Update order status
+    order.delivery_status = "RIDER_ASSIGNED"
+    db.commit()
+    
+    return {
+        "message": f"Successfully assigned order {order_id} to rider {rider.name}.",
+        "rider_name": rider.name,
+        "rider_phone": rider.phone,
+        "assignment_status": assignment.status
+    }

@@ -24,6 +24,20 @@ class Order(Base):
     payment_status = Column(String, nullable=True)
     order_type = Column(String, nullable=True)
     total_amount = Column(Float, nullable=True)
+    customer_phone = Column(String, nullable=True, index=True)
+    discount_amount = Column(Float, nullable=True)
+    discount_code = Column(String, nullable=True)
+    
+    # Delivery and Advanced Order Fields
+    delivery_address_id = Column(Integer, nullable=True)
+    delivery_address_snapshot = Column(String, nullable=True)  # JSON stored as text
+    delivery_instructions = Column(String, nullable=True)
+    delivery_status = Column(String, nullable=True)
+    delivery_fee = Column(Float, nullable=True)
+    packaging_fee = Column(Float, nullable=True)
+    gst_amount = Column(Float, nullable=True)
+    tip_amount = Column(Float, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
