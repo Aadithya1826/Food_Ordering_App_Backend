@@ -455,6 +455,32 @@ def control_chat_window(db: Session, user, action: str) -> dict:
         "action": action
     }
 
+def add_to_cart_cashier(db: Session, user, items: list) -> dict:
+    """
+    Add items to the cashier's cart. 
+    items should be a list of dictionaries with 'name' and 'quantity'.
+    """
+    return {
+        "action": "add_to_cart",
+        "items": items
+    }
+
+def print_cashier_bill(db: Session, user) -> dict:
+    """
+    Print the current bill for the cashier.
+    """
+    return {
+        "action": "print_bill"
+    }
+
+def print_future_bill(db: Session, user) -> dict:
+    """
+    Print the current bill with a future copy for the cashier.
+    """
+    return {
+        "action": "print_future_bill"
+    }
+
 # ── Public Customer Tool Registry (no auth, read-only) ─────────────────────
 CUSTOMER_TOOL_REGISTRY = {
     "list_menu_categories": {
@@ -491,6 +517,23 @@ CUSTOMER_TOOL_REGISTRY = {
 
 # ── Admin Tool Registry (auth required) ────────────────────────────────────
 TOOL_REGISTRY = {
+    "add_to_cart_cashier": {
+        "description": "Add one or more items to the cashier's cart. Provide a list of items with their names and quantities.",
+        "parameters": {
+            "items": "List of objects containing 'name' (string) and 'quantity' (integer). e.g. [{'name': 'Idli', 'quantity': 2}]"
+        },
+        "handler": add_to_cart_cashier,
+    },
+    "print_cashier_bill": {
+        "description": "Print the current bill or checkout the current cart.",
+        "parameters": {},
+        "handler": print_cashier_bill,
+    },
+    "print_future_bill": {
+        "description": "Print the current bill with a future copy.",
+        "parameters": {},
+        "handler": print_future_bill,
+    },
     "list_menu_items": {
         "description": "List available menu items for a restaurant.",
         "parameters": {
