@@ -184,7 +184,8 @@ async def natural_language_query(
             ACTION_TOOLS = [
                 "navigate_to_page", "trigger_logout", "create_order",
                 "update_order_status", "update_menu_item", "update_table_status",
-                "update_inventory_stock"
+                "update_inventory_stock", "add_to_cart_cashier", "print_cashier_bill",
+                "print_future_bill"
             ]
             
             final_assistant_text = assistant_text or f"Invoked tool {tool_name}"
@@ -332,7 +333,8 @@ async def voice_assistant_query(
                 ACTION_TOOLS = [
                     "navigate_to_page", "trigger_logout", "create_order",
                     "update_order_status", "update_menu_item", "update_table_status",
-                    "update_inventory_stock"
+                    "update_inventory_stock", "add_to_cart_cashier", "print_cashier_bill",
+                    "print_future_bill"
                 ]
                 
                 if tool_name not in ACTION_TOOLS:
