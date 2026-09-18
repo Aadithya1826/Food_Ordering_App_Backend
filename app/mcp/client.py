@@ -180,3 +180,17 @@ class GeminiClient:
                     return text[start_index:index + 1]
 
         return None
+
+    async def generate_json_stream(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, audio_base64: str = None):
+        """
+        Provides a stream-like generator over the response.
+        For simplicity, it yields the whole response as one chunk.
+        """
+        raw_text = await self.generate_text(
+            prompt, 
+            max_tokens=max_tokens, 
+            temperature=temperature, 
+            audio_base64=audio_base64, 
+            response_mime_type="application/json"
+        )
+        yield raw_text

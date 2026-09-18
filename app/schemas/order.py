@@ -4,7 +4,7 @@ from datetime import datetime
 
 class OrderItemCreate(BaseModel):
     menu_item_id: int
-    quantity: int
+    quantity: float
     price: float
 
 class OrderItemResponse(OrderItemCreate):
@@ -14,24 +14,8 @@ class OrderItemResponse(OrderItemCreate):
     class Config:
         from_attributes = True
 
-class DeliveryAddressCreate(BaseModel):
-    name: str
-    phone: str
-    address_line: str
-    city: str
-    pincode: str
-
-class DeliveryAddressResponse(DeliveryAddressCreate):
-    id: int
-    restaurant_id: Optional[int] = None
-    
-    class Config:
-        from_attributes = True
-
 class OrderCreate(BaseModel):
-    table_id: Optional[int] = None
-    order_type: str = "DINE_IN"
-    delivery_address_id: Optional[int] = None
+    table_id: int
     items: List[OrderItemCreate]
 
 class OrderStatusUpdate(BaseModel):
@@ -42,9 +26,7 @@ class OrderPaymentStatusUpdate(BaseModel):
 
 class OrderResponse(BaseModel):
     id: int
-    table_id: Optional[int] = None
-    order_type: str = "DINE_IN"
-    delivery_address_id: Optional[int] = None
+    table_id: int
     status: str
     total_amount: float
     created_at: datetime
