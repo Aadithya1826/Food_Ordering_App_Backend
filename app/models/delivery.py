@@ -73,3 +73,29 @@ class DeliveryStatusHistory(Base):
     longitude = Column(Float, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class RiderDocument(Base):
+    __tablename__ = "rider_documents"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    rider_id = Column(BigInteger, ForeignKey("delivery_partners.id"), index=True)
+    document_type = Column(String(50))
+    document_number = Column(String(100), nullable=True)
+    document_url = Column(Text, nullable=True)
+    verification_status = Column(String(50), default="PENDING")
+    verified_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class RiderBankDetail(Base):
+    __tablename__ = "rider_bank_details"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    rider_id = Column(BigInteger, ForeignKey("delivery_partners.id"), index=True, unique=True)
+    account_name = Column(String(150), nullable=True)
+    account_number = Column(String(50), nullable=True)
+    ifsc_code = Column(String(20), nullable=True)
+    bank_name = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
