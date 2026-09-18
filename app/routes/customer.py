@@ -559,6 +559,8 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             )
             db.add(history)
             db.commit()
+        else:
+            db.commit()
 
         return {
             "success": True,
