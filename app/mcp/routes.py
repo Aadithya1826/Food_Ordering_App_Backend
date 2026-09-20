@@ -1,3 +1,4 @@
+import asyncio
 import re
 import base64
 import io
@@ -16,6 +17,7 @@ from .schemas import (
     MCPVoiceRequest,
     MCPTtsRequest,
     MCPVoiceResponse,
+    CustomerMCPRequest,
 )
 from .tools import build_tool_prompt, execute_tool, list_tool_definitions
 
@@ -368,6 +370,9 @@ async def voice_assistant_query(
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+
 
 
 @router.post("/api/v1/mcp/voice/tts", response_model=MCPVoiceResponse)

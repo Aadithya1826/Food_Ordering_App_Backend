@@ -8,7 +8,7 @@ from typing import Optional
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from ..db import SessionLocal
-from ..models.delivery import DeliveryPartner, DeliveryAssignment
+from ..models.delivery import DeliveryPartner, DeliveryAssignment, RiderDocument, RiderBankDetail
 from ..models.order import Order, OrderItem
 from ..models.restaurant import Restaurant
 from ..utils.auth import create_token
@@ -578,5 +578,116 @@ def update_rider_vehicle(payload: VehicleUpdatePayload, current_rider=Depends(ge
     return {
         "vehicle_type": rider.vehicle_type,
         "vehicle_number": rider.vehicle_number,
+    }
+
+class RiderDocumentPayload(BaseModel):
+    aadhaar_front: Optional[str] = None
+    aadhaar_back: Optional[str] = None
+    pan_card: Optional[str] = None
+    license: Optional[str] = None
+
+@router.get("/api/v1/riders/me/documents")
+def get_rider_documents(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    docs = db.query(RiderDocument).filter(RiderDocument.rider_id == current_rider.id).all()
+    result = {
+        "aadhaar_front": None,
+        "aadhaar_back": None,
+        "pan_card": None,
+        "license": None,
+        "is_verified": False
+    }
+    
+    verified_count = 0
+    for doc in docs:
+        if doc.document_type == "aadhaar_front":
+            result["aadhaar_front"] = doc.document_url
+        elif doc.document_type == "aadhaar_back":
+            result["aadhaar_back"] = doc.document_url
+        elif doc.document_type == "pan_card":
+            result["pan_card"] = doc.document_url
+        elif doc.document_type == "license":
+            result["license"] = doc.document_url
+            
+        if doc.verification_status == "VERIFIED":
+            verified_count += 1
+            
+    # Assuming verified if all 4 docs are verified
+    if verified_count >= 4:
+        result["is_verified"] = True
+        
+    return result
+
+@router.patch("/api/v1/riders/me/documents")
+def update_rider_documents(payload: RiderDocumentPayload, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    docs = db.query(RiderDocument).filter(RiderDocument.rider_id == current_rider.id).all()
+    doc_map = {doc.document_type: doc for doc in docs}
+    
+    def update_or_create(doc_type, url):
+        if doc_type in doc_map:
+            doc_map[doc_type].document_url = url
+            doc_map[doc_type].verification_status = "PENDING"
+        else:
+            new_doc = RiderDocument(
+                rider_id=current_rider.id,
+                document_type=doc_type,
+                document_url=url,
+                verification_status="PENDING"
+            )
+            db.add(new_doc)
+            
+    if payload.aadhaar_front is not None:
+        update_or_create("aadhaar_front", payload.aadhaar_front)
+    if payload.aadhaar_back is not None:
+        update_or_create("aadhaar_back", payload.aadhaar_back)
+    if payload.pan_card is not None:
+        update_or_create("pan_card", payload.pan_card)
+    if payload.license is not None:
+        update_or_create("license", payload.license)
+        
+    db.commit()
+    
+    return get_rider_documents(current_rider, db)
+
+class RiderBankDetailPayload(BaseModel):
+    account_name: Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    bank_name: Optional[str] = None
+
+@router.get("/api/v1/riders/me/bank-details")
+def get_rider_bank_details(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    bank = db.query(RiderBankDetail).filter(RiderBankDetail.rider_id == current_rider.id).first()
+    if not bank:
+        return {}
+    return {
+        "account_name": bank.account_name,
+        "account_number": bank.account_number,
+        "ifsc_code": bank.ifsc_code,
+        "bank_name": bank.bank_name
+    }
+
+@router.patch("/api/v1/riders/me/bank-details")
+def update_rider_bank_details(payload: RiderBankDetailPayload, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    bank = db.query(RiderBankDetail).filter(RiderBankDetail.rider_id == current_rider.id).first()
+    if not bank:
+        bank = RiderBankDetail(rider_id=current_rider.id)
+        db.add(bank)
+        
+    if payload.account_name is not None:
+        bank.account_name = payload.account_name
+    if payload.account_number is not None:
+        bank.account_number = payload.account_number
+    if payload.ifsc_code is not None:
+        bank.ifsc_code = payload.ifsc_code
+    if payload.bank_name is not None:
+        bank.bank_name = payload.bank_name
+        
+    db.commit()
+    db.refresh(bank)
+    return {
+        "account_name": bank.account_name,
+        "account_number": bank.account_number,
+        "ifsc_code": bank.ifsc_code,
+        "bank_name": bank.bank_name
     }
 
