@@ -62,6 +62,8 @@ def get_live_orders(
 
         response.append({
             "order_id": o.id,
+            "branch_order_id": o.branch_order_id,
+            "bill_no": o.bill_no,
             "table_number": resolve_order_table_number(o, table_number_map),
             "status": o.status,
             "payment_method": method,
@@ -209,6 +211,8 @@ def get_all_orders(
 
         response.append({
             "order_id": o.id,
+            "branch_order_id": o.branch_order_id,
+            "bill_no": o.bill_no,
             "table_number": resolve_order_table_number(o, table_number_map),
             "status": o.status,
             "payment_method": method,
@@ -237,6 +241,7 @@ class PosOrderPayload(BaseModel):
     payment_method: str = "Cash"
     cart: List[PosCartItem] = []
     total_amount: float = 0
+    bill_no: Optional[int] = None
     timestamp: Optional[str] = None
 
 from ..models.table import Table
@@ -278,6 +283,10 @@ def create_pos_order(
         status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
         payment_status = "Paid" if payload.payment_method.lower() in ["cash", "upi", "card"] else "Pending"
 
+        # Calculate continuous branch_order_id
+        last_order = db.query(Order).filter(Order.restaurant_id == res_id).order_by(Order.branch_order_id.desc().nullslast()).first()
+        next_branch_order_id = (last_order.branch_order_id + 1) if last_order and last_order.branch_order_id else 1
+
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
@@ -286,7 +295,9 @@ def create_pos_order(
             status=status,
             payment_status=payment_status,
             payment_method=payload.payment_method,
-            order_type=payload.order_type.upper() if payload.order_type else "DINE_IN"
+            order_type=payload.order_type.upper() if payload.order_type else "DINE_IN",
+            bill_no=payload.bill_no,
+            branch_order_id=next_branch_order_id
         )
         
         if payload.timestamp:
@@ -312,7 +323,7 @@ def create_pos_order(
             db.add(order_item)
         db.commit()
 
-        return {"orderId": new_order.id, "message": "Order created successfully"}
+        return {"orderId": new_order.id, "branch_order_id": new_order.branch_order_id, "bill_no": new_order.bill_no, "message": "Order created successfully"}
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
