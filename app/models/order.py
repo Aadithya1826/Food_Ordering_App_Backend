@@ -27,6 +27,8 @@ class Order(Base):
     customer_phone = Column(String, nullable=True, index=True)
     discount_amount = Column(Float, nullable=True)
     discount_code = Column(String, nullable=True)
+    bill_no = Column(Integer, nullable=True)
+    branch_order_id = Column(Integer, nullable=True, index=True)
     
     # Delivery and Advanced Order Fields
     delivery_address_id = Column(Integer, nullable=True)
