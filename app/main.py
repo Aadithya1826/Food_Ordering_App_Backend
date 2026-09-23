@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider, catering
 from .mcp import router as mcp_router
 
 import logging
@@ -102,3 +102,4 @@ app.include_router(delivery_assignments.router)
 app.include_router(delivery_tracking.router)
 app.include_router(payments.router)
 app.include_router(rider.router)
+app.include_router(catering.router)
