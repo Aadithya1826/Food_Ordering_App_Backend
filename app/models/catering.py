@@ -159,7 +159,6 @@ class CateringOrderAddon(Base):
     pricing_type = Column(String, nullable=False)
     total_price = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     order = relationship("CateringOrder", back_populates="addons")
 
