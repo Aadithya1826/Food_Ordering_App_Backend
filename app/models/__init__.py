@@ -5,3 +5,12 @@ from .table import Table
 from .order import Order, OrderItem
 from .inventory import InventoryItem
 from .recipe import RecipeIngredient
+from .catering import (
+    CateringSession,
+    CateringSessionCustomization,
+    CateringSessionAddon,
+    CateringOrder,
+    CateringOrderCustomization,
+    CateringOrderAddon,
+    CateringPayment
+)

@@ -1,4 +1,6 @@
+# pyrefly: ignore [missing-import]
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import relationship
 from ..db import Base
 from datetime import datetime
@@ -39,8 +41,19 @@ class CateringOrderMenu(Base):
     restaurant_id = Column(Integer, index=True, nullable=True)
     name = Column(String, index=True)
     code = Column(String, index=True, nullable=True)
-    description = Column(Text, nullable=True)
     price = Column(Float)
     minimum_order_quantity = Column(Integer, default=50)
     is_available = Column(Boolean, default=True)
+    category_name = Column(String, index=True, nullable=True)
+    item_name = Column(String, index=True, nullable=True)
+    customization_group = Column(String, index=True, nullable=True)
+    is_swappable = Column(Boolean, default=False)
+    is_removable = Column(Boolean, default=False)
+    add_price = Column(Float, default=0.0)
+    remove_price = Column(Float, default=0.0)
+    same_group_replace_price = Column(Float, default=0.0)
+    upgrade_group = Column(String, nullable=True)
+    upgrade_price = Column(Float, default=0.0)
+    display_order = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
