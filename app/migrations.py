@@ -38,6 +38,7 @@ def create_tables():
         print("   - order_items")
         print("   - inventory_items")
         
+        # pyrefly: ignore [missing-import]
         from sqlalchemy import text
         with engine.connect() as conn:
             try:

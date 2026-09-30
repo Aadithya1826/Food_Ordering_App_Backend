@@ -1,14 +1,19 @@
 import os
 import traceback
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, Request, HTTPException
+# pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse
+# pyrefly: ignore [missing-import]
 from fastapi.staticfiles import StaticFiles
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider, catering
 from .mcp import router as mcp_router
 
 import logging
@@ -28,6 +33,7 @@ def health_live():
 @app.get("/health/ready")
 def health_ready():
     from .db import engine
+    # pyrefly: ignore [missing-import]
     from sqlalchemy import text
     try:
         with engine.connect() as conn:
@@ -102,3 +108,4 @@ app.include_router(delivery_assignments.router)
 app.include_router(delivery_tracking.router)
 app.include_router(payments.router)
 app.include_router(rider.router)
+app.include_router(catering.router)

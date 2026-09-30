@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+# pyrefly: ignore [missing-import]
+from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session, joinedload
 from ..db import SessionLocal
 from ..models.menu import MenuCategory, MenuItem
@@ -7,6 +9,7 @@ from ..models.order import Order, OrderItem
 from ..models.table import Table
 from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory
 from ..models.customer import CustomerAddress
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
@@ -20,6 +23,7 @@ from ..utils.table_refs import build_table_number_map, resolve_order_table_numbe
 from ..utils.dependencies import get_current_customer
 
 try:
+    # pyrefly: ignore [missing-import]
     import razorpay
 except Exception:
     razorpay = None
@@ -181,12 +185,22 @@ def _customer_response(c) -> dict:
 
 @router.get("/api/v1/public/customers/{customer_id}/profile")
 def get_customer_profile_by_id(
-    customer_id: int, 
+    customer_id: str, 
     current_customer = Depends(get_current_customer),
     db: Session = Depends(get_db)
 ):
-    """Return profile for a specific customer by integer ID."""
-    if customer_id != current_customer.id:
+    """Return profile for a specific customer by integer ID or phone."""
+    is_authorized = False
+    
+    if str(current_customer.id) == customer_id:
+        is_authorized = True
+    else:
+        norm_path = normalize_phone(customer_id)
+        norm_current = normalize_phone(current_customer.phone)
+        if norm_path and norm_current and norm_path == norm_current:
+            is_authorized = True
+            
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized to access this profile")
         
     return _customer_response(current_customer)
@@ -237,6 +251,7 @@ async def upload_profile_picture(
     raise HTTPException(status_code=400, detail="Send as multipart/form-data with 'file' field")
 
 
+# pyrefly: ignore [missing-import]
 from fastapi import UploadFile as _FastAPIUploadFile, File as _FastAPIFile
 import shutil as _shutil
 
@@ -895,7 +910,9 @@ def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depend
 def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
     """Return all online customer orders for a customer identified by phone number.
     Excludes internal cashier / POS counter orders."""
+    # pyrefly: ignore [missing-import]
     from sqlalchemy.orm import joinedload
+    # pyrefly: ignore [missing-import]
     from sqlalchemy import or_
 
     clean_phone = phone.strip() if phone else ""
@@ -959,24 +976,6 @@ def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session
     return result
 
 
-@router.get("/api/v1/public/customers/{phone}/profile")
-def get_customer_profile(phone: str, db: Session = Depends(get_db)):
-    """Return basic customer profile by phone number."""
-    # Try to import Customer model; gracefully handle if missing
-    try:
-        from ..models.customer import Customer as CustomerModel
-        customer = db.query(CustomerModel).filter(CustomerModel.phone == phone).first()
-        if not customer:
-            raise HTTPException(status_code=404, detail="Customer not found")
-        return {
-            "id": customer.id,
-            "phone": customer.phone,
-            "name": customer.name,
-            "email": getattr(customer, "email", None),
-            "loyalty_points": getattr(customer, "loyalty_points", 0),
-        }
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Customer model not available")
 
 
 @router.get("/api/customer/table/verify")
@@ -1079,9 +1078,13 @@ def get_customer_recommendations(
         raise HTTPException(status_code=403, detail="Not authorized to access these recommendations")
     if not restaurant_id:
         raise HTTPException(status_code=400, detail="restaurant_id is required")
+    # pyrefly: ignore [missing-import]
     from sqlalchemy import func
+    # pyrefly: ignore [missing-import]
     from ..models.customer import CustomerFavorite, Customer
+    # pyrefly: ignore [missing-import]
     from ..models.menu import MenuItem
+    # pyrefly: ignore [missing-import]
     from ..models.order import Order, OrderItem
     
     customer = current_customer
@@ -1219,6 +1222,7 @@ def get_customer_recommendations(
     combos_list = []
     
     try:
+        # pyrefly: ignore [missing-import]
         from sqlalchemy import text
         # Simple co-occurrence using raw SQL for performance
         co_sql = text('''
