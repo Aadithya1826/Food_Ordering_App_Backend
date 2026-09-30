@@ -70,13 +70,22 @@ if not allowed_origins and os.getenv("ENVIRONMENT", "development").lower() != "p
         "http://127.0.0.1:8082",
     ]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins else ["http://localhost"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if "*" in allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins if allowed_origins else ["http://localhost"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(auth.router)
 
