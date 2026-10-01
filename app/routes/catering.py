@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import]
-# Trigger reload
+# Trigger reload (razorpay fix applied)
 from fastapi import APIRouter, Depends, HTTPException
 # pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session, joinedload
@@ -571,6 +571,9 @@ def verify_payment_and_create_order(
 
     key_id = os.getenv("RAZORPAY_KEY_ID")
     key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not razorpay or not key_id or not key_secret:
+        raise HTTPException(status_code=503, detail="Razorpay integration is unavailable on this server.")
+    
     client = razorpay.Client(auth=(key_id, key_secret))
     
     if data.payment_method == "CASH":
@@ -763,6 +766,9 @@ def verify_balance_payment(
 
     key_id = os.getenv("RAZORPAY_KEY_ID")
     key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not razorpay or not key_id or not key_secret:
+        raise HTTPException(status_code=503, detail="Razorpay integration is unavailable on this server.")
+        
     client = razorpay.Client(auth=(key_id, key_secret))
     
     if data.payment_method == "CASH":

@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import Optional
 
@@ -27,3 +28,10 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: UserResponse
+
+class ManagerUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    restaurant_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
