@@ -4,7 +4,7 @@ from ..db import SessionLocal
 from ..models.user import User
 from ..models.restaurant import Restaurant
 from ..utils.auth import verify_password, create_token, hash_password
-from ..schemas import LoginRequest, LoginResponse, UserResponse, SignupRequest
+from ..schemas import LoginRequest, LoginResponse, UserResponse, SignupRequest, ManagerUpdate
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role
 
@@ -215,7 +215,7 @@ def create_manager(data: SignupRequest, user = Depends(get_current_user), db: Se
 
 
 @router.patch("/api/v1/managers/{manager_id}")
-def update_manager(manager_id: int, data: dict, user = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_manager(manager_id: int, data: ManagerUpdate, user = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Update manager details (name, email, restaurant_id, is_active)
     """
@@ -225,21 +225,23 @@ def update_manager(manager_id: int, data: dict, user = Depends(get_current_user)
     if not manager:
         raise HTTPException(status_code=404, detail="Manager not found")
 
-    if "name" in data:
-        manager.name = data["name"]
-    if "email" in data:
+    update_data = data.dict(exclude_unset=True)
+
+    if "name" in update_data:
+        manager.name = update_data["name"]
+    if "email" in update_data:
         # Check if email is being changed and if it already exists
-        if data["email"] != manager.email:
-            existing = db.query(User).filter(User.email == data["email"]).first()
+        if update_data["email"] != manager.email:
+            existing = db.query(User).filter(User.email == update_data["email"]).first()
             if existing:
                 raise HTTPException(status_code=400, detail="Email already registered")
-        manager.email = data["email"]
-    if "restaurant_id" in data:
-        manager.restaurant_id = data["restaurant_id"]
-    if "is_active" in data:
-        manager.is_active = data["is_active"]
-    if "password" in data and data["password"]:
-        manager.password_hash = hash_password(data["password"])
+        manager.email = update_data["email"]
+    if "restaurant_id" in update_data:
+        manager.restaurant_id = update_data["restaurant_id"]
+    if "is_active" in update_data:
+        manager.is_active = update_data["is_active"]
+    if "password" in update_data and update_data["password"]:
+        manager.password_hash = hash_password(update_data["password"])
 
     db.commit()
     db.refresh(manager)

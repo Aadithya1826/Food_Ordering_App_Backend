@@ -305,8 +305,10 @@ def get_hourly_report(
         last = orders[-1]
         first_local = first.created_at + timedelta(hours=5, minutes=30)
         last_local = last.created_at + timedelta(hours=5, minutes=30)
-        starting_bill = {"no": first.id, "time": first_local.strftime("%I:%M:%S %p")}
-        ending_bill = {"no": last.id, "time": last_local.strftime("%I:%M:%S %p")}
+        first_no = first.bill_no if hasattr(first, 'bill_no') and first.bill_no else (first.branch_order_id if hasattr(first, 'branch_order_id') and first.branch_order_id else first.id)
+        last_no = last.bill_no if hasattr(last, 'bill_no') and last.bill_no else (last.branch_order_id if hasattr(last, 'branch_order_id') and last.branch_order_id else last.id)
+        starting_bill = {"no": first_no, "time": first_local.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last_no, "time": last_local.strftime("%I:%M:%S %p")}
         
     restaurant = None
     if restaurant_id:
@@ -430,8 +432,10 @@ def get_item_wise_report(
         last = orders[-1]
         first_local = first.created_at + timedelta(hours=5, minutes=30)
         last_local = last.created_at + timedelta(hours=5, minutes=30)
-        starting_bill = {"no": first.id, "time": first_local.strftime("%I:%M:%S %p")}
-        ending_bill = {"no": last.id, "time": last_local.strftime("%I:%M:%S %p")}
+        first_no = first.bill_no if hasattr(first, 'bill_no') and first.bill_no else (first.branch_order_id if hasattr(first, 'branch_order_id') and first.branch_order_id else first.id)
+        last_no = last.bill_no if hasattr(last, 'bill_no') and last.bill_no else (last.branch_order_id if hasattr(last, 'branch_order_id') and last.branch_order_id else last.id)
+        starting_bill = {"no": first_no, "time": first_local.strftime("%I:%M:%S %p")}
+        ending_bill = {"no": last_no, "time": last_local.strftime("%I:%M:%S %p")}
         
     restaurant = None
     if restaurant_id:

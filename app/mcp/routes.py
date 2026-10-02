@@ -2,14 +2,21 @@ import asyncio
 import re
 import base64
 import io
+# pyrefly: ignore [missing-import]
 import edge_tts
+# pyrefly: ignore [missing-import]
 import json
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from fastapi.responses import StreamingResponse
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
-
+# pyrefly: ignore [missing-import]
 from ..utils.dependencies import get_current_user, get_db
+# pyrefly: ignore [missing-import]
 from .client import GeminiClient
+# pyrefly: ignore [missing-import]
 from .schemas import (
     MCPResponse,
     MCPTextRequest,
@@ -85,6 +92,8 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
         try:
             print("[TTS] Falling back to gTTS...")
             import asyncio
+
+            # pyrefly: ignore [missing-import]
             from gtts import gTTS
             import io
             
