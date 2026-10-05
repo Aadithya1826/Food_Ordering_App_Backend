@@ -6,7 +6,6 @@ __pycache__/
 *.pyc
 *.pyo
 scratch/
-cloudflared.exe
-dataudipi.db
 cloudflared*
+dataudipi.db
 *.db
