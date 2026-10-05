@@ -7,5 +7,8 @@
     "dev": "python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
   },
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@sentry/react-native": "^8.29.0"
+  }
 }

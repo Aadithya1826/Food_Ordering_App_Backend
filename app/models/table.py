@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from ..db import Base
 from datetime import datetime
@@ -8,7 +8,7 @@ class Table(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     restaurant_id = Column(Integer, index=True, nullable=True)
-    table_number = Column(String, unique=True, index=True)
+    table_number = Column(String, index=True)
     qr_code = Column(Text, nullable=True)
     capacity = Column(Integer, default=4)
     status = Column(String, default="Vacant")
@@ -16,3 +16,7 @@ class Table(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     orders = relationship("Order", back_populates="table")
+
+    __table_args__ = (
+        UniqueConstraint('restaurant_id', 'table_number', name='uix_restaurant_table'),
+    )

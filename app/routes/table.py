@@ -95,6 +95,11 @@ def create_table(data: TableCreate, user = Depends(get_current_user), db: Sessio
         if not table_data.get("restaurant_id"):
             raise HTTPException(status_code=400, detail="restaurant_id is required for SUPER_ADMIN")
 
+    if not table_data.get("qr_code"):
+        rest_id = table_data.get("restaurant_id")
+        t_num = table_data.get("table_number")
+        table_data["qr_code"] = f"?table={t_num}&restaurant_id={rest_id}"
+
     table = Table(**table_data)
     db.add(table)
     db.commit()
