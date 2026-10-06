@@ -48,6 +48,17 @@ class CateringOrderMenuBase(BaseModel):
     minimum_order_quantity: int = 50
     restaurant_id: Optional[int] = None
     is_available: bool = True
+    category_name: Optional[str] = None
+    item_name: Optional[str] = None
+    customization_group: Optional[str] = None
+    is_swappable: Optional[bool] = False
+    is_removable: Optional[bool] = False
+    add_price: Optional[float] = 0.0
+    remove_price: Optional[float] = 0.0
+    same_group_replace_price: Optional[float] = 0.0
+    upgrade_group: Optional[str] = None
+    upgrade_price: Optional[float] = 0.0
+    display_order: Optional[int] = 0
 
 class CateringOrderMenuResponse(CateringOrderMenuBase):
     id: int
@@ -65,3 +76,15 @@ class CateringOrderMenuUpdate(BaseModel):
     description: Optional[str] = None
     minimum_order_quantity: Optional[int] = None
     is_available: Optional[bool] = None
+    category_name: Optional[str] = None
+    item_name: Optional[str] = None
+    customization_group: Optional[str] = None
+    is_swappable: Optional[bool] = None
+    is_removable: Optional[bool] = None
+    add_price: Optional[float] = None
+    remove_price: Optional[float] = None
+    same_group_replace_price: Optional[float] = None
+    upgrade_group: Optional[str] = None
+    upgrade_price: Optional[float] = None
+    display_order: Optional[int] = None
+
