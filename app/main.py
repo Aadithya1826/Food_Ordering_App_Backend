@@ -51,6 +51,32 @@ def health_ready():
 
 # Ensure static/images directory exists
 os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images"), exist_ok=True)
+
+# pyrefly: ignore [missing-import]
+from fastapi.responses import FileResponse, RedirectResponse
+from .db import SessionLocal
+from .models.menu import MenuItem
+import urllib.parse
+
+@app.get("/static/images/{filename}")
+async def serve_image(filename: str):
+    file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images", filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    
+    db = SessionLocal()
+    try:
+        item = db.query(MenuItem).filter(MenuItem.image_url.like(f"%{filename}%")).first()
+        dish_name = item.name if item else "Delicious Food"
+        encoded_name = urllib.parse.quote(dish_name)
+        fallback_url = f"https://image.pollinations.ai/prompt/Delicious%20{encoded_name}%20food%20plating?width=800&height=600&nologo=true"
+        return RedirectResponse(url=fallback_url)
+    except Exception as e:
+        logger.error(f"Fallback image error: {e}")
+        return RedirectResponse(url="https://via.placeholder.com/150?text=No+Image")
+    finally:
+        db.close()
+
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")), name="static")
 
 # CORS Middleware Configuration

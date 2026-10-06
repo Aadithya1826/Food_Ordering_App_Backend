@@ -338,11 +338,17 @@ def get_rider_stats(current_rider=Depends(get_current_rider), db: Session = Depe
 
     today_earnings = 0.0
     for a in today_assignments:
-        today_earnings += float(getattr(a, "earnings", 0.0) or 0.0)
+        order = getattr(a, "order", None)
+        if order:
+            today_earnings += float(getattr(order, "delivery_fee", 0.0) or 0.0)
+            today_earnings += float(getattr(order, "tip_amount", 0.0) or 0.0)
 
     week_earnings = 0.0
     for a in week_assignments:
-        week_earnings += float(getattr(a, "earnings", 0.0) or 0.0)
+        order = getattr(a, "order", None)
+        if order:
+            week_earnings += float(getattr(order, "delivery_fee", 0.0) or 0.0)
+            week_earnings += float(getattr(order, "tip_amount", 0.0) or 0.0)
 
     return {
         "today_earnings": round(today_earnings, 2),
@@ -366,7 +372,11 @@ def get_delivery_history(current_rider=Depends(get_current_rider), db: Session =
         order = db.query(Order).filter(Order.id == assignment.order_id).first()
         restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first() if order else None
 
-        earnings = float(getattr(assignment, "earnings", None) or 0.0) or None
+        earnings = None
+        if order:
+            earnings = float(getattr(order, "delivery_fee", 0.0) or 0.0) + float(getattr(order, "tip_amount", 0.0) or 0.0)
+            if earnings == 0.0:
+                earnings = None
 
         # Parse customer name from delivery address snapshot
         customer_name = None
@@ -414,7 +424,10 @@ def get_earnings_history(current_rider=Depends(get_current_rider), db: Session =
 
     for assignment in assignments:
         date_str = (assignment.delivered_at or assignment.assigned_at or datetime.utcnow()).strftime("%Y-%m-%d")
-        earnings = float(getattr(assignment, "earnings", 0.0) or 0.0)
+        order = getattr(assignment, "order", None)
+        earnings = 0.0
+        if order:
+            earnings = float(getattr(order, "delivery_fee", 0.0) or 0.0) + float(getattr(order, "tip_amount", 0.0) or 0.0)
         
         earnings_by_date[date_str]["total_earnings"] += earnings
         earnings_by_date[date_str]["deliveries_count"] += 1

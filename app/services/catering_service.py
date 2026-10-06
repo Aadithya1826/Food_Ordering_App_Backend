@@ -24,6 +24,11 @@ def recalculate_catering_session(db: Session, session: CateringSession) -> Cater
     session.customization_amount = customization_amount
     session.addon_amount = addon_amount
     
+    session.transport_charge = session.transport_charge or 0.0
+    session.service_charge = session.service_charge or 0.0
+    session.cgst_amount = session.cgst_amount or 0.0
+    session.sgst_amount = session.sgst_amount or 0.0
+
     # Calculate taxes and charges
     # Assuming standard GST logic isn't strictly defined yet, we reuse existing fields
     total_amount = (
