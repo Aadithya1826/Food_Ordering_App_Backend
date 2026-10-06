@@ -303,7 +303,9 @@ def create_catering_menu(
             )
         item_data["restaurant_id"] = user.restaurant_id
 
-    item = CateringOrderMenu(**item_data)
+    valid_cols = {c.name for c in CateringOrderMenu.__table__.columns}
+    clean_data = {k: v for k, v in item_data.items() if k in valid_cols}
+    item = CateringOrderMenu(**clean_data)
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -331,12 +333,15 @@ def update_catering_menu(
         )
 
     update_data = data.model_dump(exclude_unset=True)
+    valid_cols = {c.name for c in CateringOrderMenu.__table__.columns}
     for key, value in update_data.items():
-        setattr(item, key, value)
+        if key in valid_cols:
+            setattr(item, key, value)
 
     db.commit()
     db.refresh(item)
     return item
+
 
 # DELETE catering menu
 @router.delete("/api/v1/catering/{menu_id}", status_code=204)
