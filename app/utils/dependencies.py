@@ -70,22 +70,30 @@ def get_current_rider(
         token = request.cookies["access_token"]
     
     if not token:
+        print(f"[get_current_rider] Token is missing! Cookies: {request.cookies.keys()}, Headers: {'Authorization' in request.headers}")
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     from ..middleware.jwt_middleware import verify_jwt_token
-    payload = verify_jwt_token(token)
+    try:
+        payload = verify_jwt_token(token)
+    except Exception as e:
+        print(f"[get_current_rider] Token verification failed: {e}")
+        raise
     
     if payload.get("account_type") != "RIDER":
+        print(f"[get_current_rider] Invalid account type: {payload.get('account_type')}")
         raise HTTPException(status_code=403, detail="Rider access required")
         
     rider_id = payload.get("sub") or payload.get("user_id")
     if not rider_id:
+        print(f"[get_current_rider] Missing rider_id in payload: {payload}")
         raise HTTPException(status_code=401, detail="Invalid rider token")
         
     from ..models.delivery import DeliveryPartner
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == int(rider_id)).first()
     
     if not rider:
+        print(f"[get_current_rider] Rider not found in DB for ID: {rider_id}")
         raise HTTPException(status_code=401, detail="Rider not found")
         
     return rider
