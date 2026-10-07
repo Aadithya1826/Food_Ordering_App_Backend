@@ -6,7 +6,7 @@ from datetime import datetime
 from ..models.order import Order
 from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory
 
-def update_delivery_status(db: Session, assignment_id: int, new_status: str, notes: str = None):
+def update_delivery_status(db: Session, assignment_id: int, new_status: str, notes: str = None, distance_km: float = None):
     assignment = db.query(DeliveryAssignment).filter(DeliveryAssignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Delivery assignment not found")
@@ -37,6 +37,10 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
         raise HTTPException(status_code=400, detail="Delivery already completed")
         
 
+    if current_status == new_status:
+        # Idempotent: already in this state, just return success
+        return assignment
+        
     if current_status in valid_transitions and new_status not in valid_transitions[current_status]:
         raise HTTPException(status_code=400, detail=f"Invalid state transition from {current_status} to {new_status}")
 
@@ -84,14 +88,19 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
         if new_status == "ACCEPTED" and rider:
             rider.is_available = False
             
-        if new_status == "DELIVERED" and current_status != "DELIVERED":
-            # Increment total rides exactly once
-            if rider:
+        if new_status in ["DELIVERED", "REJECTED", "FAILED", "CANCELLED"] and rider:
+            if new_status == "DELIVERED" and current_status != "DELIVERED":
                 rider.total_rides = (rider.total_rides or 0) + 1
-                rider.is_available = True
                 
-        if new_status in ["REJECTED", "FAILED", "CANCELLED"] and rider:
-            rider.is_available = True
+            # Only become available if there are no other active assignments
+            active_count = db.query(DeliveryAssignment).filter(
+                DeliveryAssignment.rider_id == rider.id,
+                DeliveryAssignment.id != assignment_id,
+                DeliveryAssignment.status.notin_(["DELIVERED", "REJECTED", "CANCELLED", "FAILED", "UNASSIGNED", "ASSIGNED"])
+            ).count()
+            
+            if active_count == 0:
+                rider.is_available = True
                 
         # Update Assignment
         assignment.status = new_status
@@ -108,6 +117,15 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
         elif new_status == "DELIVERED":
             assignment.delivered_at = now
             order.status = "COMPLETED"  # Finalize the restaurant order status
+            
+            # Compute earnings based on distance
+            if distance_km is not None:
+                RATE_PER_KM = 15
+                earned_amount = round(distance_km * RATE_PER_KM, 2)
+                if hasattr(assignment, "earnings"):
+                    assignment.earnings = earned_amount
+                if hasattr(order, "delivery_fee"):
+                    order.delivery_fee = earned_amount
             # ── Loyalty auto-credit (backend-only, idempotent) ──────────────────
             try:
                 from ..models.customer import Customer, LoyaltyTransaction
@@ -163,6 +181,22 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
         db.commit()
         db.refresh(assignment)
         db.refresh(order)
+        
+        if new_status == "REJECTED":
+            from .dispatch import dispatch_order
+            dispatched = dispatch_order(db, order.id)
+            if not dispatched:
+                # Keep order as RIDER_SEARCHING if no one else is found
+                order.delivery_status = "RIDER_SEARCHING"
+                search_hist = DeliveryStatusHistory(
+                    order_id=order.id,
+                    status="RIDER_SEARCHING",
+                    notes="Previous rider rejected; no eligible riders found.",
+                    created_at=datetime.utcnow()
+                )
+                db.add(search_hist)
+                db.commit()
+                
         return assignment
         
     except Exception as e:
@@ -205,34 +239,10 @@ def sync_order_delivery_on_status_change(db: Session, order: Order, new_restaura
 
     if new_status_upper == "PREPARING":
         if not assignment or assignment.status in ["CANCELLED", "REJECTED", "FAILED"]:
-            # Try to find an online, available rider to assign immediately
-            rider = db.query(DeliveryPartner).filter(
-                DeliveryPartner.is_online == True,
-                DeliveryPartner.is_available == True,
-                DeliveryPartner.is_active == True
-            ).first()
+            from .dispatch import dispatch_order
+            dispatched_assignment = dispatch_order(db, order.id)
 
-            if rider:
-                assignment = DeliveryAssignment(
-                    order_id=order.id,
-                    rider_id=rider.id,
-                    status="ASSIGNED",
-                    assigned_at=now
-                )
-                db.add(assignment)
-                db.flush()
-                order.delivery_status = "RIDER_ASSIGNED"
-
-                history = DeliveryStatusHistory(
-                    order_id=order.id,
-                    delivery_assignment_id=assignment.id,
-                    rider_id=rider.id,
-                    status="RIDER_ASSIGNED",
-                    notes="Order moved to PREPARING; rider assigned.",
-                    created_at=now
-                )
-                db.add(history)
-            else:
+            if not dispatched_assignment:
                 order.delivery_status = "RIDER_SEARCHING"
                 history = DeliveryStatusHistory(
                     order_id=order.id,

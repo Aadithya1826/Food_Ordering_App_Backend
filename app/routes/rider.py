@@ -82,7 +82,7 @@ def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
             "phone": rider.phone,
             "is_online": rider.is_online,
             "is_available": rider.is_available,
-            "rating": round(rider.rating or 5.0, 1),
+            "rating": round(rider.rating or 0.0, 1),
             "total_rides": rider.total_rides or 0,
         }
     }
@@ -209,41 +209,45 @@ def get_delivery_requests(current_rider=Depends(get_current_rider), db: Session 
 @router.get("/api/v1/rider/deliveries/current")
 def get_current_delivery(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
     rider_id = current_rider.id
-    assignment = db.query(DeliveryAssignment).filter(
+    assignments = db.query(DeliveryAssignment).filter(
         DeliveryAssignment.rider_id == rider_id,
         DeliveryAssignment.status.notin_(["DELIVERED", "REJECTED", "CANCELLED", "FAILED", "ASSIGNED"])
-    ).first()
+    ).all()
 
-    if not assignment:
-        return {"current_assignment": None}
+    if not assignments:
+        return {"current_assignment": None, "current_trip": []}
 
-    order = db.query(Order).filter(
-        Order.id == assignment.order_id,
-        Order.order_type.ilike("DELIVERY")
-    ).first()
-    if not order:
-        return {"current_assignment": None}
+    trip = []
+    for assignment in assignments:
+        order = db.query(Order).filter(
+            Order.id == assignment.order_id,
+            Order.order_type.ilike("DELIVERY")
+        ).first()
+        if order:
+            restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first()
+            trip.append(format_assignment_data(assignment, order, restaurant, db))
 
-    restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first() if order else None
+    if not trip:
+        return {"current_assignment": None, "current_trip": []}
 
     return {
-        "current_assignment": format_assignment_data(assignment, order, restaurant, db)
+        "current_assignment": trip[0], # Backward compatibility
+        "current_trip": trip
     }
 
 
 @router.get("/api/v1/rider/available-orders")
 def get_available_orders(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
     """
-    Returns all unassigned delivery orders so any on-duty rider can see and accept them.
-    Only returns orders of type DELIVERY that have an UNASSIGNED assignment record.
+    Returns the delivery order explicitly assigned to this rider by the dispatcher.
     """
-    unassigned_assignments = db.query(DeliveryAssignment).filter(
-        DeliveryAssignment.status == "UNASSIGNED",
-        DeliveryAssignment.rider_id == None
+    rider_assignments = db.query(DeliveryAssignment).filter(
+        DeliveryAssignment.status == "ASSIGNED",
+        DeliveryAssignment.rider_id == current_rider.id
     ).all()
 
     result = []
-    for assignment in unassigned_assignments:
+    for assignment in rider_assignments:
         order = db.query(Order).filter(
             Order.id == assignment.order_id,
             Order.order_type.ilike("DELIVERY"),
@@ -259,54 +263,42 @@ def get_available_orders(current_rider=Depends(get_current_rider), db: Session =
 @router.post("/api/v1/rider/available-orders/{order_id}/accept")
 def accept_available_order(order_id: int, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
     """
-    Allows an on-duty rider to accept an unassigned delivery order.
-    Updates the assignment with the rider's ID and transitions status to ASSIGNED.
+    Allows a rider to accept a dispatched order offered to them.
+    Transitions status to ACCEPTED.
     """
     from ..models.delivery import DeliveryStatusHistory
     from ..services.delivery_status import update_delivery_status
 
     rider_id = current_rider.id
 
-    # Ensure the rider has no other active delivery
-    active = db.query(DeliveryAssignment).filter(
+    # Check batch limit
+    active_count = db.query(DeliveryAssignment).filter(
         DeliveryAssignment.rider_id == rider_id,
-        DeliveryAssignment.status.notin_(["DELIVERED", "REJECTED", "CANCELLED", "FAILED", "UNASSIGNED"])
-    ).first()
-    if active:
-        raise HTTPException(status_code=400, detail="You already have an active delivery. Complete it before accepting a new one.")
+        DeliveryAssignment.status.notin_(["DELIVERED", "REJECTED", "CANCELLED", "FAILED", "UNASSIGNED", "ASSIGNED"])
+    ).count()
+    
+    MAX_ACTIVE_ORDERS_PER_RIDER = 2
+    if active_count >= MAX_ACTIVE_ORDERS_PER_RIDER:
+        raise HTTPException(status_code=400, detail="You have reached the maximum active orders limit.")
 
-    # Find the UNASSIGNED assignment for this order
+    # Find the ASSIGNED assignment for this order and rider
     assignment = db.query(DeliveryAssignment).filter(
         DeliveryAssignment.order_id == order_id,
-        DeliveryAssignment.status == "UNASSIGNED",
-        DeliveryAssignment.rider_id == None
+        DeliveryAssignment.status == "ASSIGNED",
+        DeliveryAssignment.rider_id == rider_id
     ).first()
     if not assignment:
-        raise HTTPException(status_code=404, detail="This order is no longer available (already accepted or not found).")
+        raise HTTPException(status_code=404, detail="This order is no longer available (already accepted or reassigned).")
 
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found.")
 
-    # Assign to this rider
-    assignment.rider_id = rider_id
-    assignment.status = "ASSIGNED"
-    assignment.assigned_at = datetime.utcnow()
-    order.delivery_status = "RIDER_ASSIGNED"
-
-    db.commit()
+    # Accept the assignment using the standard status transition
+    update_delivery_status(db, assignment.id, "ACCEPTED", "Rider accepted the dispatched order")
+    
+    # We must refresh since update_delivery_status modifies it
     db.refresh(assignment)
-
-    # Record status history
-    history = DeliveryStatusHistory(
-        order_id=order_id,
-        delivery_assignment_id=assignment.id,
-        rider_id=rider_id,
-        status="RIDER_ASSIGNED",
-        notes=f"Rider {rider_id} accepted the delivery order"
-    )
-    db.add(history)
-    db.commit()
 
     restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first()
     return {
@@ -319,7 +311,7 @@ def accept_available_order(order_id: int, current_rider=Depends(get_current_ride
 def get_rider_stats(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
     rider_id = current_rider.id
     total_rides = current_rider.total_rides or 0
-    rating = round(current_rider.rating or 5.0, 1)
+    rating = round(current_rider.rating or 0.0, 1)
 
     today_start = datetime.combine(date.today(), datetime.min.time())
     week_start = today_start - timedelta(days=today_start.weekday())

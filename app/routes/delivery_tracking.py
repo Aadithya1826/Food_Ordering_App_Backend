@@ -210,8 +210,8 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         address_data = {
             "id": getattr(order, "delivery_address_id", None),
             "full_address": snap.get("full_address", getattr(order, "delivery_address", None)),
-            "latitude": snap.get("latitude"),
-            "longitude": snap.get("longitude"),
+            "latitude": snap.get("latitude") if snap.get("latitude") else 13.0849478,
+            "longitude": snap.get("longitude") if snap.get("longitude") else 80.210126,
         }
 
     # delivery_status is an extended field; fall back to order.status for non-delivery orders
@@ -225,8 +225,8 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         "restaurant": {
             "id": restaurant.id if restaurant else None,
             "name": restaurant.name if restaurant else "Restaurant",
-            "latitude": float(restaurant.latitude) if restaurant and restaurant.latitude else None,
-            "longitude": float(restaurant.longitude) if restaurant and restaurant.longitude else None,
+            "latitude": float(restaurant.latitude) if restaurant and getattr(restaurant, "latitude", None) else 13.0185,
+            "longitude": float(restaurant.longitude) if restaurant and getattr(restaurant, "longitude", None) else 80.1706,
         },
         "delivery_address": address_data,
         "rider": rider_data,
