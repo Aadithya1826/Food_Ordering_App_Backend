@@ -537,7 +537,7 @@ def start_payment(
         razorpay_order = client.order.create({
             "amount": int(data.payment_amount * 100),
             "currency": "INR",
-            "receipt": f"cat_sess_{session.id}"
+            "receipt": f"cs_{str(session.id).replace('-', '')[:36]}"
         })
         
         session.status = "PAYMENT_PENDING"
@@ -753,7 +753,7 @@ def start_balance_payment(
         razorpay_order = client.order.create({
             "amount": int(data.payment_amount * 100),
             "currency": "INR",
-            "receipt": f"cat_ord_{order.id}"
+            "receipt": f"co_{order.id}"
         })
         
         return {

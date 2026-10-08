@@ -1,5 +1,7 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+# pyrefly: ignore [missing-import]
+from sqlalchemy.orm import Session
 from datetime import datetime
 # pyrefly: ignore [missing-import]
 from ..db import SessionLocal

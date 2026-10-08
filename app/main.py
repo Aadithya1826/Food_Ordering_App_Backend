@@ -51,32 +51,55 @@ def health_ready():
 
 # Ensure static/images directory exists
 os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images"), exist_ok=True)
+
+# pyrefly: ignore [missing-import]
+from fastapi.responses import FileResponse, RedirectResponse
+from .db import SessionLocal
+from .models.menu import MenuItem
+import urllib.parse
+
+@app.get("/static/images/{filename}")
+async def serve_image(filename: str):
+    file_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images", filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    
+    db = SessionLocal()
+    try:
+        item = db.query(MenuItem).filter(MenuItem.image_url.like(f"%{filename}%")).first()
+        dish_name = item.name if item else "Delicious Food"
+        encoded_name = urllib.parse.quote(dish_name)
+        fallback_url = f"https://image.pollinations.ai/prompt/Delicious%20{encoded_name}%20food%20plating?width=800&height=600&nologo=true"
+        return RedirectResponse(url=fallback_url)
+    except Exception as e:
+        logger.error(f"Fallback image error: {e}")
+        return RedirectResponse(url="https://via.placeholder.com/150?text=No+Image")
+    finally:
+        db.close()
+
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")), name="static")
 
 # CORS Middleware Configuration
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 allowed_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
 
-# Default development origins
-if not allowed_origins and os.getenv("ENVIRONMENT", "development").lower() != "production":
-    allowed_origins = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8081",
-        "http://localhost:8082",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:8081",
-        "http://127.0.0.1:8082",
-    ]
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins else ["http://localhost"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 app.include_router(auth.router)
 
