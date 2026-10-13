@@ -147,10 +147,17 @@ def arrived_customer(assignment_id: int, current_rider: dict = Depends(get_curre
     check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "ARRIVED_AT_CUSTOMER")
 
+from pydantic import BaseModel
+from typing import Optional
+
+class DeliverPayload(BaseModel):
+    distance_km: Optional[float] = None
+
 @router.post("/api/v1/delivery/assignments/{assignment_id}/delivered")
-def delivered(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
+def delivered(assignment_id: int, payload: DeliverPayload = None, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
     check_rider_ownership(db, assignment_id, current_rider.id)
-    return update_delivery_status(db, assignment_id, "DELIVERED")
+    distance_km = payload.distance_km if payload else None
+    return update_delivery_status(db, assignment_id, "DELIVERED", distance_km=distance_km)
 
 @router.post("/api/v1/delivery/assignments/{assignment_id}/failed")
 def failed(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
