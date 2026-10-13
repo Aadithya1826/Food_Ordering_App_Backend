@@ -41,6 +41,8 @@ class RestaurantResponse(BaseModel):
     tax_rate: Optional[float] = None
     service_charge: Optional[float] = None
     packaging_charge: Optional[float] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     created_at: datetime
     manager_name: Optional[str] = None
     orders: Optional[int] = 0
