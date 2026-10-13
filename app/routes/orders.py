@@ -1,5 +1,8 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session, joinedload
+# pyrefly: ignore [missing-import]
 from sqlalchemy import or_
 from datetime import datetime, timedelta
 from ..db import SessionLocal
@@ -28,9 +31,22 @@ def get_live_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
+    # Strictly isolate DINE_IN:
+    # Takeaway and Delivery are filtered when status == 'SERVED' (unchanged).
+    # Active unpaid DINE_IN orders remain visible if they are not SERVED OR if they have newly appended pending kitchen items.
     query = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
-    ).filter(Order.status != "SERVED")
+    ).filter(
+        Order.status != "CANCELLED",
+        or_(
+            Order.status != "SERVED",
+            (
+                (Order.order_type == "DINE_IN") &
+                (Order.payment_status != "Paid") &
+                Order.items.any(OrderItem.status == "PENDING")
+            )
+        )
+    )
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 
@@ -40,9 +56,11 @@ def get_live_orders(
     for o in orders:
         items = [
             {
+                "id": i.id,
                 "name": i.menu_item.name if i.menu_item else "Unknown Item",
                 "quantity": i.quantity,
-                "price": i.price
+                "price": i.price,
+                "status": getattr(i, "status", None) or "PENDING"
             }
             for i in o.items
         ]
@@ -75,6 +93,8 @@ def get_live_orders(
             "customer_phone": o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
+            "dine_in_session_id": o.dine_in_session_id,
+            "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
         })
 
     return response
@@ -100,12 +120,20 @@ def update_status(
     from ..services.delivery_status import sync_order_delivery_on_status_change
     sync_order_delivery_on_status_change(db, order, data.status)
 
-    # Auto-release table if order is completed or cancelled
+    # Auto-release table if order is completed or cancelled (ONLY if not part of an active Dine-In session)
     if data.status in ["COMPLETED", "CANCELLED"] and order.table_id:
         from ..models.table import Table
-        table = db.query(Table).filter(Table.id == order.table_id).first()
-        if table:
-            table.status = "Vacant"
+        from ..models.dine_in_session import DineInSession
+        session_is_active = False
+        if order.dine_in_session_id:
+            sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+            if sess and sess.status == "ACTIVE":
+                session_is_active = True
+                
+        if not session_is_active:
+            table = db.query(Table).filter(Table.id == order.table_id).first()
+            if table:
+                table.status = "Vacant"
             
     db.commit()
 
@@ -189,9 +217,11 @@ def get_all_orders(
     for o in orders:
         items = [
             {
+                "id": i.id,
                 "name": i.menu_item.name if i.menu_item else "Unknown Item",
                 "quantity": i.quantity,
-                "price": i.price
+                "price": i.price,
+                "status": getattr(i, "status", None) or "PENDING"
             }
             for i in o.items
         ]
@@ -224,9 +254,12 @@ def get_all_orders(
             "customer_phone": o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
+            "dine_in_session_id": o.dine_in_session_id,
+            "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
         })
 
     return response
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -287,15 +320,32 @@ def create_pos_order(
         last_order = db.query(Order).filter(Order.restaurant_id == res_id).order_by(Order.branch_order_id.desc().nullslast()).first()
         next_branch_order_id = (last_order.branch_order_id + 1) if last_order and last_order.branch_order_id else 1
 
+        # Check if table has an active Dine-In session to link POS orders to the shared session
+        pos_order_type = payload.order_type.upper() if payload.order_type else "DINE_IN"
+        dine_in_sess_id = None
+        if pos_order_type == "DINE_IN" and table_id:
+            from ..models.dine_in_session import DineInSession
+            active_sess = db.query(DineInSession).filter(
+                DineInSession.restaurant_id == res_id,
+                DineInSession.table_id == table_id,
+                DineInSession.status == "ACTIVE"
+            ).first()
+            if active_sess:
+                dine_in_sess_id = active_sess.id
+                active_sess.total_amount = float(active_sess.total_amount or 0.0) + float(payload.total_amount or 0.0)
+                active_sess.updated_at = datetime.utcnow()
+
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
+            dine_in_session_id=dine_in_sess_id,
+            order_source="CASHIER_POS",
             user_id=user.id,
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,
             payment_method=payload.payment_method,
-            order_type=payload.order_type.upper() if payload.order_type else "DINE_IN",
+            order_type=pos_order_type,
             bill_no=payload.bill_no,
             branch_order_id=next_branch_order_id
         )
@@ -318,7 +368,8 @@ def create_pos_order(
                 order_id=new_order.id,
                 menu_item_id=item.id,
                 quantity=item.quantity,
-                price=item.price
+                price=item.price,
+                status="PENDING"
             )
             db.add(order_item)
         db.commit()

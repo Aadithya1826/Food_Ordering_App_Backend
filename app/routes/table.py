@@ -126,6 +126,19 @@ def update_table(table_id: int, data: TableUpdate, user = Depends(get_current_us
             detail=f"Hotel admin cannot move tables to restaurant {update_data['restaurant_id']}"
         )
 
+    if update_data.get("status") == "Vacant":
+        from ..models.dine_in_session import DineInSession
+        active_unpaid_session = db.query(DineInSession).filter(
+            DineInSession.table_id == table.id,
+            DineInSession.status == "ACTIVE",
+            DineInSession.payment_status != "Paid"
+        ).first()
+        if active_unpaid_session:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot release Table {table.table_number}. Active Dine-In session {active_unpaid_session.session_uid} is unpaid (Rs. {active_unpaid_session.total_amount}). Settle the bill before releasing the table."
+            )
+
     for key, value in update_data.items():
         setattr(table, key, value)
 

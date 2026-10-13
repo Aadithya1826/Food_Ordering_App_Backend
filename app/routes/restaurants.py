@@ -74,6 +74,8 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
             name=restaurant.name,
             address=restaurant.address,
             phone=restaurant.phone,
+            latitude=restaurant.latitude,
+            longitude=restaurant.longitude,
             created_at=restaurant.created_at,
             manager_name=manager_name,
             orders=orders_count,

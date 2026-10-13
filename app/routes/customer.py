@@ -1,19 +1,23 @@
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
 # pyrefly: ignore [missing-import]
+from sqlalchemy import func, or_, and_, cast, String, text
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session, joinedload
 from ..db import SessionLocal
 from ..models.menu import MenuCategory, MenuItem
 from ..models.restaurant import Restaurant
 from ..models.order import Order, OrderItem
 from ..models.table import Table
+from ..models.dine_in_session import DineInSession
 from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory
-from ..models.customer import CustomerAddress
+from ..models.customer import CustomerAddress, Customer, LoyaltyTransaction, CustomerFavorite
 # pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
 import os
+import re
 from datetime import datetime
 import hmac
 import hashlib
@@ -305,6 +309,8 @@ class CustomerOrderPayload(BaseModel):
     model_config = {"extra": "ignore"}
 
     order_id: Optional[int] = None             # When provided, append items to this existing order
+    session_id: Optional[int] = None           # When provided, link order to this Dine-In session
+    session_uid: Optional[str] = None          # e.g. "SES-001001"
     table_number: Optional[str] = "takeaway"   # null → treated as takeaway
     order_type: Optional[str] = "Dine In"
     payment_method: str = "UPI"
@@ -339,6 +345,18 @@ class RazorpayVerifyPayload(BaseModel):
     order_id: Optional[int] = None
 
 class SettlePaymentPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    payment_method: str = "UPI"
+    payment_id: Optional[str] = None
+    amount_paid: Optional[float] = None
+
+class ActiveDineInSessionPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    restaurant_id: int
+    table_number: str
+    phone: Optional[str] = None
+
+class SettleDineInSessionPayload(BaseModel):
     model_config = {"extra": "ignore"}
     payment_method: str = "UPI"
     payment_id: Optional[str] = None
@@ -381,43 +399,100 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         if not restaurant:
             raise HTTPException(status_code=404, detail="Restaurant not found")
 
-        # Check if this is an append to an existing order (Dine-in "order more / order again")
+        # For DINE_IN, Order More MUST create a brand new Order row with status PENDING under the active session.
+        # It must NEVER mutate the previous order's items or status.
+        is_dine_in_req = (payload.order_type or "DINE_IN").upper() in ["DINE_IN", "DINE IN"]
+        if payload.order_id and is_dine_in_req:
+            # Look up existing order to inherit table/session context if not passed
+            prev_order = db.query(Order).filter(
+                Order.id == payload.order_id,
+                Order.restaurant_id == restaurant_id
+            ).first()
+            if prev_order:
+                if not payload.table_number and prev_order.table:
+                    payload.table_number = prev_order.table.table_number
+                if not payload.session_id and prev_order.dine_in_session_id:
+                    payload.session_id = prev_order.dine_in_session_id
+                if not payload.phone and prev_order.customer_phone:
+                    payload.phone = prev_order.customer_phone
+            # Clear payload.order_id so execution falls through to create a brand new Order row!
+            payload.order_id = None
+
         if payload.order_id:
             existing_order = db.query(Order).filter(
                 Order.id == payload.order_id,
                 Order.restaurant_id == restaurant_id
-            ).first()
-            if existing_order:
-                # Increment total amount using DB prices for the appended items
-                added_amount = 0.0
-                for item in payload.cart:
-                    db_item = db.query(MenuItem).filter(MenuItem.id == item.id, MenuItem.restaurant_id == restaurant_id).first()
-                    if not db_item:
-                        raise HTTPException(status_code=404, detail=f"Menu item {item.id} not found in this restaurant")
-                    qty = max(1, item.quantity)
-                    price = float(db_item.price)
-                    added_amount += price * qty
-                    
-                    order_item = OrderItem(
-                        order_id=existing_order.id,
-                        menu_item_id=db_item.id,
-                        quantity=qty,
-                        price=price
-                    )
-                    db.add(order_item)
+            ).with_for_update().first()
+            if not existing_order:
+                raise HTTPException(status_code=404, detail="Active order not found for this restaurant")
+
+            curr_status = (existing_order.status or "").upper()
+            curr_payment = (existing_order.payment_status or "").upper()
+            if curr_status in ["CANCELLED"] or curr_payment in ["PAID"]:
+                raise HTTPException(status_code=400, detail="This order is already settled or cancelled")
+
+            if not payload.cart or len(payload.cart) == 0:
+                raise HTTPException(status_code=400, detail="Cart is empty")
+
+            added_amount = 0.0
+            new_appended_items = []
+            for item in payload.cart:
+                db_item = db.query(MenuItem).filter(
+                    MenuItem.id == item.id,
+                    MenuItem.restaurant_id == restaurant_id
+                ).first()
+                if not db_item:
+                    raise HTTPException(status_code=404, detail=f"Menu item {item.id} not found in this restaurant")
+                qty = max(1, item.quantity)
+                price = float(db_item.price)
+                added_amount += price * qty
                 
-                if payload.phone and not getattr(existing_order, 'customer_phone', None):
-                    existing_order.customer_phone = payload.phone.strip()
-                existing_order.total_amount += added_amount
-                db.commit()
-                db.refresh(existing_order)
-                return {
-                    "success": True,
-                    "orderId": f"ORD-{str(existing_order.id).zfill(6)}",
-                    "dbOrderId": existing_order.id,
-                    "message": "Items appended to existing order successfully",
-                    "isAppended": True
+                order_item = OrderItem(
+                    order_id=existing_order.id,
+                    menu_item_id=db_item.id,
+                    quantity=qty,
+                    price=price,
+                    status="PENDING"
+                )
+                db.add(order_item)
+                new_appended_items.append(order_item)
+            
+            if payload.phone and not getattr(existing_order, 'customer_phone', None):
+                existing_order.customer_phone = payload.phone.strip()
+            existing_order.total_amount = float(existing_order.total_amount or 0.0) + added_amount
+            existing_order.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing_order)
+
+            all_items = db.query(OrderItem).options(
+                joinedload(OrderItem.menu_item)
+            ).filter(OrderItem.order_id == existing_order.id).all()
+
+            serialized_items = [
+                {
+                    "id": oi.id,
+                    "order_id": oi.order_id,
+                    "menu_item_id": oi.menu_item_id,
+                    "quantity": oi.quantity,
+                    "price": oi.price,
+                    "status": getattr(oi, "status", None) or "PENDING",
+                    "name": oi.menu_item.name if oi.menu_item else "Unknown Item",
+                    "image": getattr(oi.menu_item, "image_url", None)
                 }
+                for oi in all_items
+            ]
+
+            return {
+                "success": True,
+                "orderId": f"ORD-{str(existing_order.id).zfill(6)}",
+                "dbOrderId": existing_order.id,
+                "totalAmount": existing_order.total_amount,
+                "status": existing_order.status,
+                "payment_status": existing_order.payment_status,
+                "items": serialized_items,
+                "message": "Items appended successfully",
+                "isAppended": True
+            }
 
         # Find or default table_id — ONLY for Dine-In orders
         is_dine_in = (payload.order_type or "DINE_IN").upper() in ["DINE_IN", "DINE IN"]
@@ -455,13 +530,18 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         is_delivery_cash = is_delivery and (payload.payment_method in ["Cash", "COD", "Cash on Delivery"] or norm_method in ["cash", "cod", "cashondelivery"])
         is_pay_later = norm_method in ["paylater", "payatend"]
 
-        # Paid status
-        is_paid = is_digital or (is_dine_in and is_pay_at_counter)
+        # Paid status: Dine-In pay at counter or pay later is NOT paid upon initial order placement.
+        # It is paid upon final meal completion / counter settlement.
+        is_paid = is_digital and not (is_dine_in and is_pay_at_counter)
 
-        # New orders for Takeaway and Delivery start at CONFIRMED so kitchen cooks it and live tracking steps work
-        status = "CONFIRMED"
-        if not is_paid and not is_delivery_cash and not is_pay_later and not is_pay_at_counter:
+        # Dine-In orders always start as PENDING for the kitchen.
+        # Takeaway and Delivery start as CONFIRMED when paid, cash-on-delivery, etc.
+        if is_dine_in:
             status = "PENDING"
+        else:
+            status = "CONFIRMED"
+            if not is_paid and not is_delivery_cash and not is_pay_later and not is_pay_at_counter:
+                status = "PENDING"
             
         payment_status = "Paid" if is_paid else "Pending"
 
@@ -519,9 +599,47 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         
         calculated_total = calculated_subtotal + delivery_fee + packaging_fee + tip_amount - discount_amount
 
+        # Dine-In session linking
+        session_obj = None
+        if is_dine_in and table_id:
+            if payload.session_id:
+                session_obj = db.query(DineInSession).filter(
+                    DineInSession.id == payload.session_id,
+                    DineInSession.restaurant_id == restaurant_id
+                ).with_for_update().first()
+            if not session_obj and payload.session_uid:
+                session_obj = db.query(DineInSession).filter(
+                    DineInSession.session_uid == payload.session_uid,
+                    DineInSession.restaurant_id == restaurant_id
+                ).with_for_update().first()
+            if not session_obj:
+                # Find current active session for this table
+                session_obj = db.query(DineInSession).filter(
+                    DineInSession.table_id == table_id,
+                    DineInSession.restaurant_id == restaurant_id,
+                    DineInSession.status == "ACTIVE"
+                ).with_for_update().first()
+            if not session_obj:
+                # Create a new active Dine-In session
+                new_uid = f"SES-{int(time.time())}-{table_id}"
+                session_obj = DineInSession(
+                    session_uid=new_uid,
+                    restaurant_id=restaurant_id,
+                    table_id=table_id,
+                    customer_phone=payload.phone.strip() if payload.phone else None,
+                    status="ACTIVE",
+                    payment_status="Pending",
+                    total_amount=0.0
+                )
+                db.add(session_obj)
+                db.flush()
+                db.refresh(session_obj)
+
         new_order = Order(
             restaurant_id=restaurant_id,
             table_id=table_id,
+            dine_in_session_id=session_obj.id if session_obj else None,
+            order_source="CUSTOMER_APP",
             total_amount=calculated_total,
             status=status,
             payment_status=payment_status,
@@ -547,9 +665,17 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 order_id=new_order.id,
                 menu_item_id=item_id,
                 quantity=qty,
-                price=price
+                price=price,
+                status="PENDING"
             )
             db.add(order_item)
+
+        if session_obj:
+            # Authoritatively update session total_amount
+            session_obj.total_amount = float(session_obj.total_amount or 0.0) + calculated_total
+            if payload.phone and not session_obj.customer_phone:
+                session_obj.customer_phone = payload.phone.strip()
+            session_obj.updated_at = datetime.utcnow()
 
         # If Delivery Order, create an UNASSIGNED delivery assignment.
         # Riders will pick this up from the /api/v1/rider/available-orders endpoint.
@@ -581,6 +707,10 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             "success": True,
             "orderId": f"ORD-{str(new_order.id).zfill(6)}",
             "dbOrderId": new_order.id,
+            "sessionId": session_obj.id if session_obj else None,
+            "sessionUid": session_obj.session_uid if session_obj else None,
+            "totalAmount": new_order.total_amount,
+            "sessionTotalAmount": float(session_obj.total_amount) if session_obj else new_order.total_amount,
             "message": "Order placed successfully",
             "isAppended": False,
             "delivery_address": delivery_snapshot
@@ -605,11 +735,50 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
         if not order:
             raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-        order.payment_status = "Paid"
-        order.payment_method = payload.payment_method or "Pay at Counter"
-        order.status = "SERVED"
+        # Settle Dine-In session orders or standalone order
+        sibling_orders = [order]
+        session_bill_no = order.bill_no
+
+        if order.dine_in_session_id:
+            sibling_orders = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.dine_in_session_id == order.dine_in_session_id,
+                Order.restaurant_id == order.restaurant_id
+            ).all()
+
+            if not session_bill_no:
+                session_bill_no = next((o.bill_no for o in sibling_orders if o.bill_no), None)
+            if not session_bill_no:
+                max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+                session_bill_no = (max_bill_no or 0) + 1
+
+            for o in sibling_orders:
+                if (o.status or "").upper() != "CANCELLED":
+                    o.payment_status = "Paid"
+                    o.payment_method = payload.payment_method or "Pay at Counter"
+                    o.bill_no = session_bill_no
+                    if (o.status or "").upper() in ["CONFIRMED", "PENDING", "PREPARING", "READY"]:
+                        o.status = "SERVED"
+                    o.updated_at = datetime.utcnow()
+        else:
+            order.payment_status = "Paid"
+            order.payment_method = payload.payment_method or "Pay at Counter"
+            order.status = "SERVED"
+            if not order.bill_no:
+                max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+                order.bill_no = (max_bill_no or 0) + 1
+            session_bill_no = order.bill_no
+
         if payload.amount_paid is not None and payload.amount_paid > 0:
+            final_settle_total = payload.amount_paid
             order.total_amount = payload.amount_paid
+        else:
+            final_settle_total = sum(
+                float(o.total_amount or 0.0)
+                for o in sibling_orders
+                if (o.status or "").upper() != "CANCELLED"
+            )
 
         # Release table
         table_num = None
@@ -631,7 +800,7 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
                 if cust:
                     RUPEES_PER_POINT = 10
                     # Discount is already subtracted from total_amount. Tip and packaging are typically not rewarded.
-                    base_amount = (order.total_amount or 0) - (order.packaging_fee or 0) - (order.tip_amount or 0)
+                    base_amount = (final_settle_total or 0) - (order.packaging_fee or 0) - (order.tip_amount or 0)
                     points_to_award = max(0, int(base_amount // RUPEES_PER_POINT))
                     if points_to_award > 0:
                         existing = db.query(LoyaltyTransaction).filter(
@@ -656,28 +825,33 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
         db.refresh(order)
 
         items = []
-        for i in (order.items or []):
-            m_id = i.menu_item_id
-            m_name = "Item"
-            m_img = None
-            if i.menu_item:
-                m_id = i.menu_item.id
-                m_name = i.menu_item.name or "Item"
-                m_img = getattr(i.menu_item, 'image_url', None)
-            items.append({
-                "id": m_id,
-                "name": m_name,
-                "quantity": i.quantity,
-                "price": i.price,
-                "image": m_img
-            })
+        for o in sibling_orders:
+            if (o.status or "").upper() != "CANCELLED":
+                for i in (o.items or []):
+                    if (getattr(i, 'status', None) or "").upper() == "CANCELLED":
+                        continue
+                    m_id = i.menu_item_id
+                    m_name = "Item"
+                    m_img = None
+                    if i.menu_item:
+                        m_id = i.menu_item.id
+                        m_name = i.menu_item.name or "Item"
+                        m_img = getattr(i.menu_item, 'image_url', None)
+                    items.append({
+                        "id": m_id,
+                        "name": m_name,
+                        "quantity": i.quantity,
+                        "price": float(i.price),
+                        "image": m_img
+                    })
 
         return {
             "success": True,
             "orderId": f"ORD-{str(order.id).zfill(6)}",
             "dbOrderId": order.id,
+            "bill_no": session_bill_no,
             "tableNumber": table_num or "T-01",
-            "totalAmount": order.total_amount,
+            "totalAmount": final_settle_total,
             "paymentStatus": order.payment_status,
             "paymentMethod": order.payment_method,
             "status": order.status,
@@ -690,6 +864,608 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dine-In Session-Based Endpoints (DINE-IN ONLY)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/api/dine-in/session/active")
+def get_or_create_active_dine_in_session(
+    payload: ActiveDineInSessionPayload, 
+    db: Session = Depends(get_db)
+):
+    """
+    Look up or initialize the active Dine-In session for a specific table.
+    Enforces transactional concurrency and table row locking.
+    """
+    try:
+        base_num = payload.table_number.replace("T-", "").replace("t-", "").strip()
+        table = db.query(Table).filter(
+            (Table.table_number == payload.table_number) |
+            (Table.table_number == base_num) |
+            (Table.table_number == f"T-{base_num}"),
+            Table.restaurant_id == payload.restaurant_id
+        ).with_for_update().first()
+
+        if not table:
+            table = Table(
+                table_number=payload.table_number, 
+                restaurant_id=payload.restaurant_id, 
+                capacity=4, 
+                status="Occupied"
+            )
+            db.add(table)
+            db.flush()
+            db.refresh(table)
+        else:
+            table.status = "Occupied"
+            db.flush()
+
+        session_obj = db.query(DineInSession).filter(
+            DineInSession.table_id == table.id,
+            DineInSession.restaurant_id == payload.restaurant_id,
+            DineInSession.status == "ACTIVE"
+        ).with_for_update().first()
+
+        if not session_obj:
+            new_uid = f"SES-{int(time.time())}-{table.id}"
+            session_obj = DineInSession(
+                session_uid=new_uid,
+                restaurant_id=payload.restaurant_id,
+                table_id=table.id,
+                customer_phone=payload.phone.strip() if payload.phone else None,
+                status="ACTIVE",
+                payment_status="Pending",
+                total_amount=0.0
+            )
+            db.add(session_obj)
+            db.commit()
+            db.refresh(session_obj)
+        else:
+            if payload.phone and not session_obj.customer_phone:
+                session_obj.customer_phone = payload.phone.strip()
+                db.commit()
+                db.refresh(session_obj)
+
+        # Retrieve all orders under this session
+        session_orders = db.query(Order).options(
+            joinedload(Order.items).joinedload(OrderItem.menu_item)
+        ).filter(
+            Order.dine_in_session_id == session_obj.id,
+            Order.restaurant_id == payload.restaurant_id
+        ).order_by(Order.id.asc()).all()
+
+        total_accumulated = sum(
+            float(o.total_amount or 0.0) 
+            for o in session_orders 
+            if (o.status or "").upper() != "CANCELLED"
+        )
+
+        orders_data = []
+        for o in session_orders:
+            orders_data.append({
+                "id": o.id,
+                "orderId": f"ORD-{str(o.id).zfill(6)}",
+                "status": o.status,
+                "payment_status": o.payment_status,
+                "total_amount": float(o.total_amount or 0.0),
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+                "items": [
+                    {
+                        "id": oi.id,
+                        "menu_item_id": oi.menu_item_id,
+                        "name": oi.menu_item.name if oi.menu_item else "Item",
+                        "quantity": oi.quantity,
+                        "price": float(oi.price),
+                        "status": getattr(oi, "status", None) or "PENDING",
+                        "image": getattr(oi.menu_item, "image_url", None) if oi.menu_item else None
+                    }
+                    for oi in o.items
+                ]
+            })
+
+        return {
+            "success": True,
+            "sessionId": session_obj.id,
+            "sessionUid": session_obj.session_uid,
+            "tableNumber": table.table_number,
+            "tableId": table.id,
+            "status": session_obj.status,
+            "paymentStatus": session_obj.payment_status,
+            "totalAmount": total_accumulated,
+            "orders": orders_data
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/dine-in/session/{session_id}/details")
+def get_dine_in_session_details(
+    session_id: str, 
+    restaurant_id: int = 1, 
+    db: Session = Depends(get_db)
+):
+    """
+    Get all orders and combined bill for a Dine-In session by numeric ID or session_uid.
+    """
+    session_obj = None
+    if session_id.isdigit():
+        session_obj = db.query(DineInSession).filter(
+            DineInSession.id == int(session_id),
+            DineInSession.restaurant_id == restaurant_id
+        ).first()
+    if not session_obj:
+        session_obj = db.query(DineInSession).filter(
+            DineInSession.session_uid == session_id,
+            DineInSession.restaurant_id == restaurant_id
+        ).first()
+
+    if not session_obj:
+        raise HTTPException(status_code=404, detail="Dine-in session not found")
+
+    table = db.query(Table).filter(Table.id == session_obj.table_id).first()
+    table_num = table.table_number if table else "Table"
+
+    session_orders = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(
+        Order.dine_in_session_id == session_obj.id,
+        Order.restaurant_id == restaurant_id
+    ).order_by(Order.id.asc()).all()
+
+    total_accumulated = sum(
+        float(o.total_amount or 0.0) 
+        for o in session_orders 
+        if (o.status or "").upper() != "CANCELLED"
+    )
+
+    all_items_flat = []
+    orders_data = []
+    for idx, o in enumerate(session_orders, 1):
+        order_items = []
+        for oi in o.items:
+            item_entry = {
+                "id": oi.id,
+                "order_id": oi.order_id,
+                "menu_item_id": oi.menu_item_id,
+                "name": oi.menu_item.name if oi.menu_item else "Item",
+                "quantity": oi.quantity,
+                "price": float(oi.price),
+                "status": getattr(oi, "status", None) or "PENDING",
+                "image": getattr(oi.menu_item, "image_url", None) if oi.menu_item else None
+            }
+            order_items.append(item_entry)
+            all_items_flat.append(item_entry)
+
+        orders_data.append({
+            "round": idx,
+            "id": o.id,
+            "orderId": f"ORD-{str(o.id).zfill(6)}",
+            "status": o.status,
+            "payment_status": o.payment_status,
+            "total_amount": float(o.total_amount or 0.0),
+            "created_at": o.created_at.isoformat() if o.created_at else None,
+            "items": order_items
+        })
+
+    # Latest active order id (for primary tracking display)
+    latest_order = session_orders[-1] if session_orders else None
+
+    return {
+        "success": True,
+        "sessionId": session_obj.id,
+        "sessionUid": session_obj.session_uid,
+        "tableNumber": table_num,
+        "tableId": session_obj.table_id,
+        "status": session_obj.status,
+        "paymentStatus": session_obj.payment_status,
+        "totalAmount": total_accumulated,
+        "latestOrderId": f"ORD-{str(latest_order.id).zfill(6)}" if latest_order else None,
+        "latestDbOrderId": latest_order.id if latest_order else None,
+        "latestOrderStatus": latest_order.status if latest_order else None,
+        "orders": orders_data,
+        "allItems": all_items_flat
+    }
+
+
+@router.post("/api/dine-in/session/{session_id}/settle")
+def settle_dine_in_session(
+    session_id: str, 
+    payload: SettleDineInSessionPayload, 
+    restaurant_id: int = 1,
+    db: Session = Depends(get_db)
+):
+    """
+    Settle the entire Dine-In session and release the table.
+    Marks session as COMPLETED and all non-cancelled orders as Paid.
+    """
+    try:
+        session_obj = None
+        if session_id.isdigit():
+            session_obj = db.query(DineInSession).filter(
+                DineInSession.id == int(session_id),
+                DineInSession.restaurant_id == restaurant_id
+            ).with_for_update().first()
+        if not session_obj:
+            session_obj = db.query(DineInSession).filter(
+                DineInSession.session_uid == session_id,
+                DineInSession.restaurant_id == restaurant_id
+            ).with_for_update().first()
+
+        if not session_obj:
+            raise HTTPException(status_code=404, detail="Dine-in session not found")
+
+        # Query all orders in this session
+        session_orders = db.query(Order).filter(
+            Order.dine_in_session_id == session_obj.id,
+            Order.restaurant_id == restaurant_id
+        ).with_for_update().all()
+
+        final_combined_total = sum(
+            float(o.total_amount or 0.0) 
+            for o in session_orders 
+            if (o.status or "").upper() != "CANCELLED"
+        )
+        if payload.amount_paid is not None and payload.amount_paid > 0:
+            final_combined_total = payload.amount_paid
+
+        # Close session
+        session_obj.status = "COMPLETED"
+        session_obj.payment_status = "Paid"
+        session_obj.total_amount = final_combined_total
+        session_obj.closed_at = datetime.utcnow()
+        session_obj.updated_at = datetime.utcnow()
+
+        # Generate single authoritative bill number for this session (Section 9)
+        existing_bill_no = next((o.bill_no for o in session_orders if o.bill_no), None)
+        if existing_bill_no:
+            session_bill_no = existing_bill_no
+        else:
+            max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+            session_bill_no = (max_bill_no or 0) + 1
+
+        # Update all session orders
+        for o in session_orders:
+            if (o.status or "").upper() != "CANCELLED":
+                o.payment_status = "Paid"
+                o.payment_method = payload.payment_method or "Pay at Counter"
+                o.bill_no = session_bill_no
+                if (o.status or "").upper() in ["CONFIRMED", "PENDING", "PREPARING", "READY"]:
+                    o.status = "SERVED"
+                o.updated_at = datetime.utcnow()
+
+        # Release table to Vacant
+        table = db.query(Table).filter(Table.id == session_obj.table_id).first()
+        table_num = "Table"
+        if table:
+            table.status = "Vacant"
+            table_num = table.table_number
+
+        # ── Loyalty auto-credit for customer on combined session bill ──────────────────
+        try:
+            from ..models.customer import Customer, LoyaltyTransaction
+            if session_obj.customer_phone:
+                norm_phone = normalize_phone(session_obj.customer_phone)
+                cust = db.query(Customer).filter(Customer.phone == norm_phone).first()
+                if not cust:
+                    cust = db.query(Customer).filter(Customer.phone == session_obj.customer_phone).first()
+                if cust:
+                    RUPEES_PER_POINT = 10
+                    points_to_award = max(0, int(final_combined_total // RUPEES_PER_POINT))
+                    if points_to_award > 0:
+                        first_order_id = session_orders[0].id if session_orders else None
+                        lt = LoyaltyTransaction(
+                            customer_id=cust.id,
+                            order_id=first_order_id,
+                            points=points_to_award,
+                            transaction_type="ORDER_CREDIT",
+                            description=f"Dine-in Session {session_obj.session_uid} completed"
+                        )
+                        db.add(lt)
+                        cust.loyalty_points = (cust.loyalty_points or 0) + points_to_award
+        except Exception as _loyalty_err:
+            import logging as _log
+            _log.getLogger(__name__).warning(f"Loyalty credit failed for session {session_obj.session_uid}: {_loyalty_err}")
+
+        db.commit()
+
+        return {
+            "success": True,
+            "sessionId": session_obj.id,
+            "sessionUid": session_obj.session_uid,
+            "tableNumber": table_num,
+            "totalAmount": final_combined_total,
+            "bill_no": session_bill_no,
+            "paymentStatus": "Paid",
+            "paymentMethod": payload.payment_method or "Pay at Counter",
+            "message": "Session settled and table released successfully"
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CancelOrderPayload(BaseModel):
+    reason: Optional[str] = "Customer requested cancellation"
+    phone: Optional[str] = None
+
+class CancelItemPayload(BaseModel):
+    reason: Optional[str] = "Customer requested cancellation"
+
+def _find_order_by_id_or_ref(db: Session, order_id_val: Any, restaurant_id: Optional[int] = None, for_update: bool = False, load_items: bool = False):
+    """
+    Robustly locate an Order regardless of ID format (int, '35266', 'ORD-035266')
+    and handle multi-branch restaurant_id defaults safely without failing on branch mismatch.
+    """
+    clean_id = None
+    s_val = str(order_id_val).strip()
+    match = re.search(r'\d+', s_val)
+    if match:
+        try:
+            clean_id = int(match.group())
+        except Exception:
+            clean_id = None
+
+    q = db.query(Order)
+    if load_items:
+        q = q.options(joinedload(Order.items).joinedload(OrderItem.menu_item))
+
+    # 1. If restaurant_id provided and > 0, try exact match with restaurant_id first
+    if restaurant_id is not None and restaurant_id > 0 and clean_id is not None:
+        cand_q = q.filter(Order.id == clean_id, Order.restaurant_id == restaurant_id)
+        if for_update:
+            cand_q = cand_q.with_for_update()
+        cand = cand_q.first()
+        if cand:
+            return cand
+
+    # 2. Match by clean numeric primary key across all branches (Order.id is unique PK)
+    if clean_id is not None:
+        cand_q = q.filter(Order.id == clean_id)
+        if for_update:
+            cand_q = cand_q.with_for_update()
+        cand = cand_q.first()
+        if cand:
+            return cand
+
+    # 3. Match by branch_order_id if restaurant_id is specified
+    if clean_id is not None and restaurant_id is not None and restaurant_id > 0:
+        cand_q = q.filter(Order.branch_order_id == clean_id, Order.restaurant_id == restaurant_id)
+        if for_update:
+            cand_q = cand_q.with_for_update()
+        cand = cand_q.first()
+        if cand:
+            return cand
+
+    return None
+
+
+@router.get("/api/orders/{order_id}/cancellation-eligibility")
+@router.get("/api/v1/orders/{order_id}/cancellation-eligibility")
+def check_cancellation_eligibility(
+    order_id: str,
+    restaurant_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=False, load_items=True)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    order_status = (order.status or "").upper()
+    is_blocked = order_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"] or any(
+        (getattr(item, "status", None) or "PENDING").upper() in ["PREPARING", "READY", "SERVED", "COMPLETED"]
+        for item in order.items
+    )
+
+    items_data = []
+    for item in order.items:
+        i_status = (getattr(item, "status", None) or "PENDING").upper()
+        items_data.append({
+            "id": item.id,
+            "name": item.menu_item.name if item.menu_item else "Item",
+            "quantity": item.quantity,
+            "price": item.price,
+            "status": i_status,
+            "eligible": i_status == "PENDING" and not is_blocked
+        })
+
+    eligible = not is_blocked and order_status in ["PENDING", "CONFIRMED"]
+    return {
+        "order_id": order.id,
+        "eligible": eligible,
+        "status": order.status,
+        "reason": None if eligible else (
+            "Order is already cancelled" if order_status == "CANCELLED"
+            else "Cancellation unavailable. The kitchen has already started preparing this order."
+        ),
+        "items": items_data
+    }
+
+
+@router.post("/api/orders/{order_id}/cancel")
+@router.post("/api/v1/orders/{order_id}/cancel")
+def cancel_order(
+    order_id: str,
+    payload: CancelOrderPayload = CancelOrderPayload(),
+    restaurant_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Cancel an order before kitchen preparation begins.
+    Applies strictly to DINE_IN, TAKEAWAY, and DELIVERY.
+    Blocks cancellation if status is PREPARING, READY, SERVED, etc. (HTTP 409).
+    """
+    try:
+        # Concurrency safety: row-level lock on order
+        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True)
+
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        curr_status = (order.status or "").upper()
+        if curr_status == "CANCELLED":
+            return {
+                "success": True,
+                "message": "Order is already cancelled",
+                "order_id": order.id,
+                "status": "CANCELLED"
+            }
+
+        # Check if kitchen has already started preparation (HTTP 409)
+        if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Cancellation unavailable. The kitchen has already started preparing this order."
+            )
+
+        # Check item-level preparation
+        for oi in order.items:
+            oi_status = (getattr(oi, "status", None) or "PENDING").upper()
+            if oi_status in ["PREPARING", "READY", "SERVED", "COMPLETED"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cancellation unavailable. The kitchen has already started preparing this order."
+                )
+
+        # Proceed with cancellation
+        order.status = "CANCELLED"
+        for oi in order.items:
+            oi.status = "CANCELLED"
+
+        # Dine-In session handling: update combined bill
+        norm_type = (order.order_type or "").upper().replace(" ", "_")
+        if norm_type in ["DINE_IN", "DINEIN"] and order.dine_in_session_id:
+            sess = db.query(DineInSession).filter(
+                DineInSession.id == order.dine_in_session_id
+            ).with_for_update().first()
+            if sess:
+                remaining_orders = db.query(Order).filter(
+                    Order.dine_in_session_id == sess.id,
+                    Order.id != order.id,
+                    Order.status != "CANCELLED"
+                ).all()
+                sess.total_amount = sum(float(ro.total_amount or 0.0) for ro in remaining_orders)
+                sess.updated_at = datetime.utcnow()
+
+        # Delivery handling
+        if norm_type == "DELIVERY":
+            from ..models.delivery import DeliveryAssignment
+            da = db.query(DeliveryAssignment).filter(DeliveryAssignment.order_id == order.id).first()
+            if da and da.status not in ["DELIVERED", "CANCELLED"]:
+                da.status = "CANCELLED"
+                da.updated_at = datetime.utcnow()
+            order.delivery_status = "CANCELLED"
+
+        # Prepaid handling
+        if (order.payment_status or "").upper() == "PAID":
+            order.payment_status = "REFUND_PENDING"
+
+        order.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Order cancelled successfully",
+            "order_id": order.id,
+            "status": "CANCELLED",
+            "payment_status": order.payment_status,
+            "order_type": order.order_type
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/orders/{order_id}/items/{item_id}/cancel")
+@router.post("/api/v1/orders/{order_id}/items/{item_id}/cancel")
+def cancel_order_item(
+    order_id: str,
+    item_id: int,
+    payload: CancelItemPayload = CancelItemPayload(),
+    restaurant_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Item-level cancellation before kitchen preparation starts.
+    """
+    try:
+        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True)
+
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        curr_status = (order.status or "").upper()
+        if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Cancellation unavailable. The kitchen has already started preparing this order."
+            )
+
+        item = db.query(OrderItem).filter(
+            OrderItem.id == item_id,
+            OrderItem.order_id == order.id
+        ).with_for_update().first()
+
+        if not item:
+            raise HTTPException(status_code=404, detail="Order item not found")
+
+        item_status = (getattr(item, "status", None) or "PENDING").upper()
+        if item_status in ["PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Cancellation unavailable. This item has already been prepared or cancelled."
+            )
+
+        item.status = "CANCELLED"
+        deducted = float(item.price) * float(item.quantity)
+        order.total_amount = max(0.0, float(order.total_amount or 0.0) - deducted)
+
+        # If all items are cancelled, mark the entire order as CANCELLED
+        active_items = [oi for oi in order.items if (getattr(oi, "status", None) or "").upper() != "CANCELLED"]
+        if not active_items:
+            order.status = "CANCELLED"
+
+        # Dine-In session update
+        norm_type = (order.order_type or "").upper().replace(" ", "_")
+        if norm_type in ["DINE_IN", "DINEIN"] and order.dine_in_session_id:
+            sess = db.query(DineInSession).filter(
+                DineInSession.id == order.dine_in_session_id
+            ).with_for_update().first()
+            if sess:
+                remaining_orders = db.query(Order).filter(
+                    Order.dine_in_session_id == sess.id,
+                    Order.status != "CANCELLED"
+                ).all()
+                sess.total_amount = sum(float(ro.total_amount or 0.0) for ro in remaining_orders)
+                sess.updated_at = datetime.utcnow()
+
+        order.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Item cancelled successfully",
+            "item_id": item.id,
+            "item_status": "CANCELLED",
+            "order_id": order.id,
+            "order_total": order.total_amount,
+            "order_status": order.status
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/api/razorpay-key")
 def get_razorpay_key():
@@ -816,35 +1592,75 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid order ID format")
         
-    order = db.query(Order).filter(Order.id == parsed_id, Order.restaurant_id == restaurant_id).first()
+    order_query = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(Order.id == parsed_id)
+    order = order_query.filter(Order.restaurant_id == restaurant_id).first() if restaurant_id else None
+    if not order:
+        order = order_query.first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    restaurant_id = order.restaurant_id
+
     table_number_map = build_table_number_map(db, [order])
 
+    # If this order belongs to a settled bill or dine-in session, aggregate all active sibling orders
+    sibling_orders = [order]
+    if (order.status or "").upper() != "CANCELLED":
+        if order.bill_no:
+            sibling_orders = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.bill_no == order.bill_no,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            ).order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
+        elif order.dine_in_session_id:
+            sibling_orders = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.dine_in_session_id == order.dine_in_session_id,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            ).order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
+
     items = []
-    for oi in order.items:
-        items.append({
-            "id": oi.id,
-            "order_id": oi.order_id,
-            "menu_item_id": oi.menu_item_id,
-            "quantity": oi.quantity,
-            "price": oi.price,
-            "name": oi.menu_item.name if oi.menu_item else None,
-            "description": oi.menu_item.description if oi.menu_item else None,
-            "image_url": oi.menu_item.image_url if oi.menu_item else None
-        })
+    combined_total = 0.0
+    for ord_obj in sibling_orders:
+        combined_total += float(ord_obj.total_amount or 0.0)
+        for oi in (ord_obj.items or []):
+            oi_status = getattr(oi, "status", None) or ("CANCELLED" if (ord_obj.status or "").upper() == "CANCELLED" else "PENDING")
+            if (ord_obj.status or "").upper() != "CANCELLED" and oi_status == "CANCELLED":
+                continue
+            items.append({
+                "id": oi.id,
+                "order_id": oi.order_id,
+                "menu_item_id": oi.menu_item_id,
+                "quantity": oi.quantity,
+                "price": float(oi.price),
+                "name": oi.menu_item.name if oi.menu_item else None,
+                "description": oi.menu_item.description if oi.menu_item else None,
+                "image_url": oi.menu_item.image_url if oi.menu_item else None,
+                "status": oi_status
+            })
         
     order_dict = {
         "id": order.id,
         "orderId": f"ORD-{str(order.id).zfill(6)}",
+        "bill_no": order.bill_no,
+        "dine_in_session_id": order.dine_in_session_id,
         "restaurant_id": order.restaurant_id,
         "table_id": order.table_id,
         "table_number": resolve_order_table_number(order, table_number_map),
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,
-        "total_amount": order.total_amount,
+        "total_amount": combined_total if len(sibling_orders) > 1 else order.total_amount,
         "created_at": order.created_at,
         "updated_at": order.updated_at
     }
@@ -857,7 +1673,7 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
 # ──────────────────────────────────────────────
 
 @router.get("/api/v1/public/orders/{order_id}")
-def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Session = Depends(get_db)):
     """Same as /api/orders/{order_id} but accessible without auth."""
     try:
         if order_id.startswith("ORD-"):
@@ -869,27 +1685,67 @@ def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depend
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid order ID format")
 
-    order = db.query(Order).filter(Order.id == parsed_id, Order.restaurant_id == restaurant_id).first()
+    order_query = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(Order.id == parsed_id)
+    order = order_query.filter(Order.restaurant_id == restaurant_id).first() if restaurant_id else None
+    if not order:
+        order = order_query.first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    restaurant_id = order.restaurant_id
+
     table_number_map = build_table_number_map(db, [order])
+
+    sibling_orders = [order]
+    if (order.status or "").upper() != "CANCELLED":
+        if order.bill_no:
+            sibling_orders = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.bill_no == order.bill_no,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            ).order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
+        elif order.dine_in_session_id:
+            sibling_orders = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.dine_in_session_id == order.dine_in_session_id,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            ).order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
+
     items = []
-    for oi in order.items:
-        items.append({
-            "id": oi.id,
-            "order_id": oi.order_id,
-            "menu_item_id": oi.menu_item_id,
-            "quantity": oi.quantity,
-            "price": oi.price,
-            "name": oi.menu_item.name if oi.menu_item else None,
-            "description": oi.menu_item.description if oi.menu_item else None,
-            "image_url": oi.menu_item.image_url if oi.menu_item else None,
-        })
+    combined_total = 0.0
+    for ord_obj in sibling_orders:
+        combined_total += float(ord_obj.total_amount or 0.0)
+        for oi in (ord_obj.items or []):
+            oi_status = getattr(oi, "status", None) or ("CANCELLED" if (ord_obj.status or "").upper() == "CANCELLED" else "PENDING")
+            if (ord_obj.status or "").upper() != "CANCELLED" and oi_status == "CANCELLED":
+                continue
+            items.append({
+                "id": oi.id,
+                "order_id": oi.order_id,
+                "menu_item_id": oi.menu_item_id,
+                "quantity": oi.quantity,
+                "price": float(oi.price),
+                "name": oi.menu_item.name if oi.menu_item else None,
+                "description": oi.menu_item.description if oi.menu_item else None,
+                "image_url": oi.menu_item.image_url if oi.menu_item else None,
+                "status": oi_status
+            })
 
     order_dict = {
         "id": order.id,
         "orderId": f"ORD-{str(order.id).zfill(6)}",
+        "bill_no": order.bill_no,
+        "dine_in_session_id": order.dine_in_session_id,
         "restaurant_id": order.restaurant_id,
         "table_id": order.table_id,
         "table_number": resolve_order_table_number(order, table_number_map),
@@ -899,7 +1755,7 @@ def get_public_order(order_id: str, restaurant_id: int = 1, db: Session = Depend
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,
-        "total_amount": order.total_amount,
+        "total_amount": combined_total if len(sibling_orders) > 1 else order.total_amount,
         "created_at": order.created_at,
         "updated_at": order.updated_at,
     }
