@@ -128,9 +128,10 @@ async def mobile_agent_tool(
 
             # Filter by category name if provided
             if category_name:
+                clean_cat = category_name.replace("varieties", "").replace("items", "").strip()
                 cat_ids = [
                     c.id for c in all_categories
-                    if category_name in c.name.lower()
+                    if clean_cat in c.name.lower() or c.name.lower() in clean_cat
                 ]
                 if not cat_ids:
                     return {"success": False, "code": "CATEGORY_NOT_FOUND", "error": f"The category '{category_name}' does not exist on this restaurant's menu."}
@@ -138,12 +139,24 @@ async def mobile_agent_tool(
 
             # Filter by search query
             if query_str:
-                items = [i for i in items if query_str in i.name.lower() or
-                         (i.description and query_str in i.description.lower())]
+                # Remove common voice-bot conversational fluff
+                noise_words = ["varieties", "items", "please", "some", "show", "me", "list"]
+                keywords = [kw for kw in query_str.split() if kw not in noise_words]
+                
+                if keywords:
+                    filtered_items = []
+                    for i in items:
+                        name_lower = i.name.lower()
+                        desc_lower = (i.description or "").lower()
+                        # If ANY important keyword is in the name or description, include it
+                        if any(kw in name_lower or kw in desc_lower for kw in keywords):
+                            filtered_items.append(i)
+                    
+                    items = filtered_items
 
             if not items:
                 if query_str:
-                    return {"success": False, "code": "MENU_ITEM_NOT_FOUND", "error": f"The item '{query_str}' does not exist on this restaurant's menu."}
+                    return {"success": False, "code": "MENU_ITEM_NOT_FOUND", "error": f"I couldn't find '{query_str}' on the menu."}
                 else:
                     return {"success": False, "code": "MENU_EMPTY", "error": "This restaurant currently has no menu items available."}
 

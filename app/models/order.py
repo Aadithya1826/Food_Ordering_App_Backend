@@ -1,4 +1,6 @@
+# pyrefly: ignore [missing-import]
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import relationship
 from ..db import Base
 from datetime import datetime
@@ -40,11 +42,16 @@ class Order(Base):
     gst_amount = Column(Float, nullable=True)
     tip_amount = Column(Float, nullable=True)
     
+    # Dine-In Session linkage (Additive & strictly isolated to Dine-In)
+    dine_in_session_id = Column(Integer, ForeignKey("dine_in_sessions.id"), nullable=True, index=True)
+    order_source = Column(String(32), default="CUSTOMER_APP", nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
+    dine_in_session = relationship("DineInSession", back_populates="orders")
 
 
 class OrderItem(Base):
@@ -55,6 +62,7 @@ class OrderItem(Base):
     menu_item_id = Column(Integer, ForeignKey("menu_items.id"), index=True)
     quantity = Column(Float)
     price = Column(Float)
+    status = Column(String, default="PENDING", nullable=True)
     
     order = relationship("Order", back_populates="items")
     menu_item = relationship("MenuItem")

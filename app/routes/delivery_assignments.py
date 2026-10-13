@@ -1,10 +1,13 @@
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.order import Order
 from ..models.delivery import DeliveryAssignment
 from ..services.delivery_status import update_delivery_status
 from ..utils.dependencies import get_current_rider
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -147,6 +150,7 @@ def arrived_customer(assignment_id: int, current_rider: dict = Depends(get_curre
     check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "ARRIVED_AT_CUSTOMER")
 
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import Optional
 
