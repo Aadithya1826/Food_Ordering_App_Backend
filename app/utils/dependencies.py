@@ -70,32 +70,49 @@ def get_current_rider(
         token = request.cookies["access_token"]
     
     if not token:
-        print(f"[get_current_rider] Token is missing! Cookies: {request.cookies.keys()}, Headers: {'Authorization' in request.headers}")
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     from ..middleware.jwt_middleware import verify_jwt_token
-    try:
-        payload = verify_jwt_token(token)
-    except Exception as e:
-        print(f"[get_current_rider] Token verification failed: {e}")
-        raise
+    payload = verify_jwt_token(token)
     
-    if payload.get("account_type") != "RIDER":
-        print(f"[get_current_rider] Invalid account type: {payload.get('account_type')}")
+    # Validate token type
+    token_type = payload.get("type")
+    if token_type and token_type != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    
+    # Validate role
+    role = payload.get("role")
+    account_type = payload.get("account_type")
+    if role != "RIDER" and account_type != "RIDER":
         raise HTTPException(status_code=403, detail="Rider access required")
         
     rider_id = payload.get("sub") or payload.get("user_id")
     if not rider_id:
-        print(f"[get_current_rider] Missing rider_id in payload: {payload}")
         raise HTTPException(status_code=401, detail="Invalid rider token")
         
+    # Check session revocation via jti
+    jti = payload.get("jti")
+    if jti:
+        from ..models.delivery import RiderSession
+        session_record = db.query(RiderSession).filter(RiderSession.jti == jti).first()
+        if session_record and session_record.is_revoked:
+            raise HTTPException(status_code=401, detail="Session has been revoked. Please log in again.")
+        
     from ..models.delivery import DeliveryPartner
-    rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == int(rider_id)).first()
+    try:
+        rider_pk = int(rider_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid rider ID in token")
+        
+    rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_pk).first()
     
     if not rider:
-        print(f"[get_current_rider] Rider not found in DB for ID: {rider_id}")
         raise HTTPException(status_code=401, detail="Rider not found")
         
+    if not rider.is_active:
+        raise HTTPException(status_code=401, detail="Rider account is inactive or disabled")
+        
+    rider._token_jti = jti
     return rider
 
 def get_current_customer(

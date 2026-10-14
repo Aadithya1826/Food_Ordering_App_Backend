@@ -16,6 +16,7 @@ except ImportError:
 from ..db import SessionLocal
 from ..utils.dependencies import get_db, get_current_customer
 from ..models.customer import Customer
+from ..models.restaurant import Restaurant
 from ..models.menu import CateringOrderMenu
 from ..models.catering import (
     CateringSession, CateringSessionCustomization, CateringSessionAddon,
@@ -203,6 +204,13 @@ def create_catering_session(
     if data.customer_id != customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to create session for this customer")
         
+    if data.restaurant_id is None:
+        raise HTTPException(status_code=400, detail="restaurant_id is required")
+
+    restaurant = db.query(Restaurant).filter(Restaurant.id == data.restaurant_id).first()
+    if not restaurant:
+        raise HTTPException(status_code=400, detail=f"Invalid restaurant_id: Restaurant {data.restaurant_id} does not exist")
+        
     pkg = db.query(CateringOrderMenu).filter(
         CateringOrderMenu.code == data.package_code,
         CateringOrderMenu.is_available == True
@@ -216,7 +224,7 @@ def create_catering_session(
         
     session = CateringSession(
         customer_id=customer.id,
-        restaurant_id=data.restaurant_id,
+        restaurant_id=restaurant.id,
         package_name=pkg.name,
         package_code=pkg.code,
         package_price=pkg.price,
@@ -244,6 +252,12 @@ def update_event_details(
     if session.status == "CONVERTED":
         raise HTTPException(status_code=400, detail="Cannot modify a converted session")
         
+    if data.restaurant_id is not None:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == data.restaurant_id).first()
+        if not restaurant:
+            raise HTTPException(status_code=400, detail=f"Invalid restaurant_id: Restaurant {data.restaurant_id} does not exist")
+        session.restaurant_id = restaurant.id
+
     if data.event_name is not None:
         session.event_name = data.event_name
     if data.event_date is not None:
@@ -568,16 +582,26 @@ def verify_payment_and_create_order(
     if not session or session.customer_id != customer.id:
         raise HTTPException(status_code=404, detail="Session not found")
         
-    if session.status == "CONVERTED":
-        order = db.query(CateringOrder).filter(CateringOrder.catering_session_id == session.id).first()
-        if order:
-            return {
-                "success": True,
-                "order_id": order.id,
-                "payment_status": order.payment_status,
-                "order_status": order.order_status,
-                "message": "Order already created"
-            }
+    # Check for already created confirmed order to prevent duplicates
+    existing_order = db.query(CateringOrder).filter(CateringOrder.catering_session_id == session.id).first()
+    if existing_order:
+        if session.status != "CONVERTED":
+            session.status = "CONVERTED"
+            db.commit()
+        return {
+            "success": True,
+            "order_id": existing_order.id,
+            "payment_status": existing_order.payment_status,
+            "order_status": existing_order.order_status,
+            "message": "Order already created"
+        }
+
+    # Validate that session has a valid, existing restaurant_id
+    if session.restaurant_id is None:
+        raise HTTPException(status_code=400, detail="Cannot create catering order: Session has no restaurant_id assigned")
+    restaurant = db.query(Restaurant).filter(Restaurant.id == session.restaurant_id).first()
+    if not restaurant:
+        raise HTTPException(status_code=400, detail=f"Cannot create catering order: Restaurant {session.restaurant_id} does not exist")
             
     existing_payment = db.query(CateringPayment).filter(CateringPayment.transaction_id == data.razorpay_payment_id).first()
     if existing_payment:
