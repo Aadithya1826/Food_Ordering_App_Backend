@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
-from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider, catering
+from .routes import auth, menu, orders, table, inventory, restaurants, reports, customer, recipes, customer_delivery, delivery_assignments, delivery_tracking, payments, rider, catering, admin_catering
 from .mcp import router as mcp_router
 
 import logging
@@ -132,3 +132,4 @@ app.include_router(delivery_tracking.router)
 app.include_router(payments.router)
 app.include_router(rider.router)
 app.include_router(catering.router)
+app.include_router(admin_catering.router)
