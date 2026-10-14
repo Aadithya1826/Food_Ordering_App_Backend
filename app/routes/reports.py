@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, or_, and_
 from datetime import datetime, timedelta
+import json
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..models.menu import MenuItem
 from ..models.restaurant import Restaurant
+from ..models.customer import Customer
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id
 
@@ -559,22 +561,51 @@ def get_mobile_app_report(
     )
 
     # ── Base query ──────────────────────────────────────────────────────────
+    # Fetch all mobile app orders for the given date range
     q = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(
         Order.created_at >= utc_start,
         Order.created_at < utc_end,
-        paid_condition,
         mobile_condition
     )
     if restaurant_id:
         q = q.filter(Order.restaurant_id == restaurant_id)
 
-    orders = q.order_by(Order.created_at.asc()).all()
+    all_orders = q.order_by(Order.created_at.asc()).all()
+
+    # ── Filter fulfilled/paid orders for sales aggregation ──────────────────
+    paid_orders = [
+        o for o in all_orders
+        if o.status != "CANCELLED" and (
+            (o.payment_status or "").lower() == "paid" or
+            o.status in ["SERVED", "COMPLETED", "DELIVERED"]
+        )
+    ]
+
+    # ── Batch resolve customer names ────────────────────────────────────────
+    customer_phones = {o.customer_phone.strip() for o in all_orders if o.customer_phone and o.customer_phone.strip()}
+    customer_map = {}
+    if customer_phones:
+        phone_variants = set(customer_phones)
+        for p in customer_phones:
+            digits = "".join(filter(str.isdigit, p))
+            if len(digits) >= 10:
+                phone_variants.add(digits[-10:])
+                phone_variants.add(f"+91{digits[-10:]}")
+                phone_variants.add(f"+91 {digits[-10:]}")
+
+        cust_records = db.query(Customer).filter(Customer.phone.in_(phone_variants)).all()
+        for c in cust_records:
+            if c.phone and c.name:
+                customer_map[c.phone.strip()] = c.name
+                digits = "".join(filter(str.isdigit, c.phone))
+                if len(digits) >= 10:
+                    customer_map[digits[-10:]] = c.name
 
     # ── Aggregation ─────────────────────────────────────────────────────────
     total_sales = 0.0
-    total_orders = len(orders)
+    total_orders = len(paid_orders)
     item_aggregates = {}
     hourly_buckets = {h: 0.0 for h in range(24)}
     
@@ -585,7 +616,7 @@ def get_mobile_app_report(
         "DELIVERY": {"count": 0, "sales": 0.0},
     }
 
-    for o in orders:
+    for o in paid_orders:
         amount = o.total_amount or 0.0
         total_sales += amount
 
@@ -619,6 +650,75 @@ def get_mobile_app_report(
             item_aggregates[key]["qty"] += item.quantity
             item_aggregates[key]["amount"] += item.quantity * rate
 
+    # ── Build detailed orders history list ──────────────────────────────────
+    orders_list = []
+    for o in all_orders:
+        amount = float(o.total_amount or 0.0)
+        local_time = o.created_at + timedelta(hours=5, minutes=30)
+
+        # Order type
+        raw_type = (o.order_type or "").upper().replace(" ", "_").replace("-", "_")
+        if "DELIV" in raw_type or o.delivery_address_id is not None or (hasattr(o, 'delivery_address_snapshot') and o.delivery_address_snapshot is not None):
+            otype = "DELIVERY"
+        elif "TAKE" in raw_type or o.table_id is None or str(o.table_id).lower() == "takeaway":
+            otype = "TAKEAWAY"
+        else:
+            otype = "DINE_IN"
+
+        # Customer name resolution
+        raw_phone = (o.customer_phone or "").strip()
+        digits = "".join(filter(str.isdigit, raw_phone))
+        cust_name = customer_map.get(raw_phone)
+        if not cust_name and len(digits) >= 10:
+            cust_name = customer_map.get(digits[-10:])
+        if not cust_name and o.delivery_address_snapshot:
+            try:
+                snap = json.loads(o.delivery_address_snapshot) if isinstance(o.delivery_address_snapshot, str) else o.delivery_address_snapshot
+                if isinstance(snap, dict) and snap.get("contact_name"):
+                    cust_name = snap["contact_name"]
+            except Exception:
+                pass
+        if not cust_name:
+            cust_name = "Guest"
+
+        # Items breakdown and summary
+        order_items = []
+        summary_items = []
+        for it in o.items:
+            iname = it.menu_item.name if it.menu_item else "Item"
+            iqty = it.quantity or 1
+            iprice = float(it.price or (it.menu_item.price if it.menu_item else 0.0))
+            order_items.append({
+                "name": iname,
+                "quantity": iqty,
+                "rate": iprice,
+                "amount": round(iqty * iprice, 2)
+            })
+            summary_items.append(f"{iname} x{iqty}")
+
+        orders_list.append({
+            "id": o.id,
+            "order_id": f"ORD-{str(o.id).zfill(6)}",
+            "bill_no": o.bill_no,
+            "customer_name": cust_name,
+            "customer_phone": raw_phone,
+            "order_type": otype,
+            "status": o.status or "CONFIRMED",
+            "payment_status": o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED", "DELIVERED"] else "Pending"),
+            "payment_method": o.payment_method or "UPI",
+            "total_amount": round(amount, 2),
+            "date": local_time.strftime("%d/%m/%Y"),
+            "time": local_time.strftime("%I:%M:%S %p"),
+            "date_time": local_time.strftime("%d/%m/%Y, %I:%M %p"),
+            "created_at": local_time.isoformat(),
+            "items_count": sum(it["quantity"] for it in order_items),
+            "items_summary": ", ".join(summary_items) if summary_items else "No items",
+            "items": order_items
+        })
+
+    # Sort orders reverse chronological (newest first)
+    orders_list_sorted = sorted(orders_list, key=lambda x: x["id"], reverse=True)
+
     # ── Items list ──────────────────────────────────────────────────────────
     items_list = []
     for (name, rate), data in item_aggregates.items():
@@ -648,9 +748,10 @@ def get_mobile_app_report(
     # ── First / last order summary ──────────────────────────────────────────
     starting_order = None
     ending_order = None
-    if orders:
-        first = orders[0]
-        last = orders[-1]
+    target_boundary_orders = paid_orders if paid_orders else all_orders
+    if target_boundary_orders:
+        first = target_boundary_orders[0]
+        last = target_boundary_orders[-1]
         first_local = first.created_at + timedelta(hours=5, minutes=30)
         last_local = last.created_at + timedelta(hours=5, minutes=30)
         starting_order = {
@@ -681,6 +782,7 @@ def get_mobile_app_report(
         "timeline": timeline,
         "order_type_breakdown": order_type_breakdown,
         "order_type_counts": order_type_counts,
+        "orders": orders_list_sorted,
         "identification_note": (
             "Mobile app orders identified by: user_id IS NULL AND customer_phone IS NOT NULL. "
             "Excludes POS (user_id set) and MCP/voice orders (no customer_phone). "
