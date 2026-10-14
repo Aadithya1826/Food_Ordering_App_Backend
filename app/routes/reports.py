@@ -527,16 +527,23 @@ def get_mobile_app_report(
             end_of_day = start_of_day + timedelta(days=1)
             display_date = target_date.strftime("%d/%m/%Y")
     else:
-        if date:
+        if date and date.lower() == "all":
+            start_of_day = datetime(2020, 1, 1)
+            end_of_day = datetime.utcnow() + timedelta(days=2)
+            display_date = "All Dates"
+        elif date:
             try:
                 target_date = datetime.strptime(date, "%Y-%m-%d").date()
             except ValueError:
                 target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
         else:
             target_date = datetime.utcnow().date()
-        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
-        end_of_day = start_of_day + timedelta(days=1)
-        display_date = target_date.strftime("%d/%m/%Y")
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
 
     # Adjust for IST (UTC+5:30) — identical to existing reports
     utc_start = start_of_day - timedelta(hours=5, minutes=30)
@@ -570,7 +577,9 @@ def get_mobile_app_report(
         mobile_condition
     )
     if restaurant_id:
-        q = q.filter(Order.restaurant_id == restaurant_id)
+        q_hotel = q.filter(Order.restaurant_id == restaurant_id)
+        if q_hotel.count() > 0:
+            q = q_hotel
 
     all_orders = q.order_by(Order.created_at.asc()).all()
 
