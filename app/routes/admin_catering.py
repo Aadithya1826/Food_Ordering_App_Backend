@@ -568,12 +568,7 @@ def get_admin_catering_orders(
     )
 
     if effective_restaurant_id is not None:
-        query = query.filter(
-            or_(
-                CateringOrder.restaurant_id == effective_restaurant_id,
-                CateringOrder.restaurant_id.is_(None)
-            )
-        )
+        query = query.filter(CateringOrder.restaurant_id == effective_restaurant_id)
 
     if order_status:
         query = query.filter(func.upper(CateringOrder.order_status) == order_status.upper())
@@ -676,6 +671,7 @@ def get_admin_catering_order_detail(
     - Payment Due Date & Outstanding Balance
     """
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    effective_restaurant_id = resolve_restaurant_id(user)
 
     order = db.query(CateringOrder).options(
         joinedload(CateringOrder.payments),
@@ -685,6 +681,12 @@ def get_admin_catering_order_detail(
 
     if not order:
         raise HTTPException(status_code=404, detail="Catering order not found")
+
+    if effective_restaurant_id is not None and order.restaurant_id != effective_restaurant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Not authorized to access orders from branch {order.restaurant_id}"
+        )
 
     customer = db.query(Customer).filter(Customer.id == order.customer_id).first()
 
@@ -815,10 +817,17 @@ def update_admin_catering_order_status(
     Transitions: CONFIRMED -> PREPARING -> READY -> COMPLETED | CANCELLED
     """
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    effective_restaurant_id = resolve_restaurant_id(user)
 
     order = db.query(CateringOrder).filter(CateringOrder.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Catering order not found")
+
+    if effective_restaurant_id is not None and order.restaurant_id != effective_restaurant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Not authorized to update orders from branch {order.restaurant_id}"
+        )
 
     new_status = payload.order_status.strip().upper()
     valid_statuses = ["CONFIRMED", "PREPARING", "READY", "COMPLETED", "CANCELLED"]
@@ -876,12 +885,7 @@ def get_admin_catering_reports(
 
     query = db.query(CateringOrder).options(joinedload(CateringOrder.payments))
     if effective_restaurant_id is not None:
-        query = query.filter(
-            or_(
-                CateringOrder.restaurant_id == effective_restaurant_id,
-                CateringOrder.restaurant_id.is_(None)
-            )
-        )
+        query = query.filter(CateringOrder.restaurant_id == effective_restaurant_id)
 
     if start_date:
         start_dt = datetime.datetime.combine(start_date, datetime.time.min)

@@ -106,11 +106,13 @@ def main():
     print("Testing POST /catering/sessions...")
     res = client.post("/api/v1/public/catering/sessions", json={
         "customer_id": cust.id,
+        "restaurant_id": 2,
         "package_code": "V-RICE MENU 1",
         "guest_count": 100
     })
     print(res.status_code, res.json())
     assert res.status_code == 200
+    assert res.json().get("restaurant_id") == 2
     session_id = res.json().get("session_id") or res.json().get("id")
     
     # We need an item ID to test replacements
