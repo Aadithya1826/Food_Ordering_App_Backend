@@ -8,10 +8,10 @@ from typing import Optional
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from ..db import SessionLocal
-from ..models.delivery import DeliveryPartner, DeliveryAssignment, RiderDocument, RiderBankDetail
+from ..models.delivery import DeliveryPartner, DeliveryAssignment, RiderDocument, RiderBankDetail, RiderSession
 from ..models.order import Order, OrderItem
 from ..models.restaurant import Restaurant
-from ..utils.auth import create_token
+from ..utils.auth import create_rider_token, verify_password, hash_password
 from ..utils.dependencies import get_current_rider
 
 router = APIRouter()
@@ -27,24 +27,107 @@ def get_db():
 
 class RiderLoginPayload(BaseModel):
     phone: str
-    otp: Optional[str] = None
-    password: Optional[str] = None
+    password: str
+
+
+class RiderRegisterPayload(BaseModel):
+    name: str
+    phone: str
+    password: str
+
+
+class SetPasswordPayload(BaseModel):
+    phone: str
+    password: str
     name: Optional[str] = None
 
 
-@router.post("/api/v1/rider/auth/login")
-def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
-    # Accept default OTP/passwords or bypass if empty in dev
-    if payload.otp and payload.otp not in ["1234", "0000", ""]:
-        if payload.password and payload.password not in ["1234", "0000", ""]:
-            raise HTTPException(status_code=400, detail="Invalid OTP/Password (Use 1234)")
+@router.post("/api/v1/rider/auth/register")
+def rider_register(payload: RiderRegisterPayload, db: Session = Depends(get_db)):
+    name = payload.name.strip()
+    raw_phone = payload.phone.strip()
+    pwd = payload.password.strip()
 
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if not raw_phone:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+    if not pwd:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+
+    clean_digits = "".join([c for c in raw_phone if c.isdigit()])
+    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+
+    # Check if rider already exists
+    existing = db.query(DeliveryPartner).filter(
+        (DeliveryPartner.phone == raw_phone) |
+        (DeliveryPartner.phone == clean_phone) |
+        (DeliveryPartner.phone == f"+91{clean_phone}") |
+        (DeliveryPartner.phone.ilike(f"%{clean_phone}%"))
+    ).first()
+
+    if not existing:
+        raise HTTPException(
+            status_code=403,
+            detail="Phone number not registered. Please contact your administrator to onboard as a delivery partner."
+        )
+
+    if existing.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Account already registered with this phone number. Please sign in with your password."
+        )
+
+    if not existing.is_active:
+        raise HTTPException(
+            status_code=401,
+            detail="Account is disabled. Please contact administrator."
+        )
+
+    # Authorized rider completing registration / setting initial password
+    existing.name = name
+    existing.password_hash = hash_password(pwd)
+    existing.is_active = True
+    existing.is_online = True
+    existing.is_available = True
+    db.commit()
+    rider = existing
+
+    token_info = create_rider_token(rider.id)
+    new_session = RiderSession(
+        rider_id=rider.id,
+        jti=token_info["jti"],
+        expires_at=token_info["expires_at"],
+        is_revoked=False
+    )
+    db.add(new_session)
+    db.commit()
+
+    return {
+        "access_token": token_info["access_token"],
+        "token": token_info["token"],
+        "token_type": "bearer",
+        "expires_in": token_info["expires_in"],
+        "rider": {
+            "id": rider.id,
+            "name": rider.name,
+            "phone": rider.phone,
+            "is_active": rider.is_active,
+            "is_online": rider.is_online,
+            "is_available": rider.is_available,
+            "rating": round(rider.rating or 0.0, 1),
+            "total_rides": rider.total_rides or 0,
+        }
+    }
+
+
+@router.post("/api/v1/rider/auth/set-password")
+def set_rider_password(payload: SetPasswordPayload, db: Session = Depends(get_db)):
     raw_phone = payload.phone.strip()
     clean_digits = "".join([c for c in raw_phone if c.isdigit()])
-    if len(clean_digits) > 10 and clean_digits.startswith("91"):
-        clean_phone = clean_digits[2:]
-    else:
-        clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
 
     rider = db.query(DeliveryPartner).filter(
         (DeliveryPartner.phone == raw_phone) |
@@ -54,7 +137,52 @@ def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
     ).first()
 
     if not rider:
-        raise HTTPException(status_code=401, detail="Rider not registered. Please contact administrator.")
+        raise HTTPException(status_code=404, detail="Rider not registered with this phone number.")
+
+    if not rider.is_active:
+        raise HTTPException(status_code=401, detail="Account is disabled. Please contact administrator.")
+
+    pwd = payload.password.strip()
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+
+    if payload.name and payload.name.strip():
+        rider.name = payload.name.strip()
+
+    rider.password_hash = hash_password(pwd)
+    db.commit()
+    return {"message": "Password updated successfully. You can now log in."}
+
+
+
+@router.post("/api/v1/rider/auth/login")
+def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
+    if not payload.password:
+        raise HTTPException(status_code=400, detail="Password is required")
+
+    raw_phone = payload.phone.strip()
+    clean_digits = "".join([c for c in raw_phone if c.isdigit()])
+    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+
+    rider = db.query(DeliveryPartner).filter(
+        (DeliveryPartner.phone == raw_phone) |
+        (DeliveryPartner.phone == clean_phone) |
+        (DeliveryPartner.phone == f"+91{clean_phone}") |
+        (DeliveryPartner.phone.ilike(f"%{clean_phone}%"))
+    ).first()
+
+    if not rider:
+        # Generic error message to prevent account enumeration
+        raise HTTPException(status_code=401, detail="Invalid phone number or password")
+
+    if not rider.is_active:
+        raise HTTPException(status_code=401, detail="Account is disabled. Please contact administrator.")
+
+    if not rider.password_hash:
+        raise HTTPException(status_code=401, detail="Password has not been set for this account. Please set up your password.")
+
+    if not verify_password(payload.password, rider.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid phone number or password")
 
     active_assignment = db.query(DeliveryAssignment).filter(
         DeliveryAssignment.rider_id == rider.id,
@@ -65,21 +193,30 @@ def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
     if active_assignment:
         rider.is_available = False
     else:
-        # Only preserve or calculate availability safely
         rider.is_available = True
+
+    token_info = create_rider_token(rider.id)
+
+    # Record active session in rider_sessions table
+    new_session = RiderSession(
+        rider_id=rider.id,
+        jti=token_info["jti"],
+        expires_at=token_info["expires_at"],
+        is_revoked=False
+    )
+    db.add(new_session)
     db.commit()
 
-    class MockUser:
-        id = rider.id
-        role = "RIDER"
-
-    token = create_token(MockUser(), account_type="RIDER")
     return {
-        "token": token,
+        "access_token": token_info["access_token"],
+        "token": token_info["token"],
+        "token_type": "bearer",
+        "expires_in": token_info["expires_in"],
         "rider": {
             "id": rider.id,
             "name": rider.name,
             "phone": rider.phone,
+            "is_active": rider.is_active,
             "is_online": rider.is_online,
             "is_available": rider.is_available,
             "rating": round(rider.rating or 0.0, 1),
@@ -89,7 +226,19 @@ def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
 
 
 @router.post("/api/v1/rider/auth/logout")
-def rider_logout():
+def rider_logout(current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    # Server-side token revocation: revoke the active session
+    jti = getattr(current_rider, "_token_jti", None)
+    if jti:
+        session_rec = db.query(RiderSession).filter(RiderSession.jti == jti).first()
+        if session_rec:
+            session_rec.is_revoked = True
+
+    # Set rider offline upon logout
+    current_rider.is_online = False
+    current_rider.is_available = False
+    db.commit()
+
     return {"message": "Rider logged out successfully"}
 
 
@@ -455,7 +604,9 @@ def get_rider_delivery_assignment(assignment_id: int, current_rider=Depends(get_
 # ── Delivery Partner profile endpoints (called by frontend) ──────────────────
 
 @router.get("/api/v1/delivery-partners/{rider_id}")
-def get_delivery_partner(rider_id: int, db: Session = Depends(get_db)):
+def get_delivery_partner(rider_id: int, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    if current_rider.id != rider_id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot access another rider's profile")
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")
@@ -483,7 +634,9 @@ class AvailabilityPayload(BaseModel):
 
 
 @router.patch("/api/v1/delivery-partners/{rider_id}/online-status")
-def patch_online_status(rider_id: int, payload: OnlineStatusPayload, db: Session = Depends(get_db)):
+def patch_online_status(rider_id: int, payload: OnlineStatusPayload, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    if current_rider.id != rider_id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot modify another rider's status")
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")
@@ -495,7 +648,9 @@ def patch_online_status(rider_id: int, payload: OnlineStatusPayload, db: Session
 
 
 @router.patch("/api/v1/delivery-partners/{rider_id}/availability")
-def patch_availability(rider_id: int, payload: AvailabilityPayload, db: Session = Depends(get_db)):
+def patch_availability(rider_id: int, payload: AvailabilityPayload, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
+    if current_rider.id != rider_id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot modify another rider's availability")
     rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == rider_id).first()
     if not rider:
         raise HTTPException(status_code=404, detail="Rider not found")

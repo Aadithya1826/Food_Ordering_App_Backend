@@ -188,6 +188,7 @@ class CateringOrderResponse(BaseModel):
     payment_status: Optional[str] = None
     order_status: str
     payments: List[CateringPaymentResponse] = []
+    created_at: Optional[datetime.datetime] = None
 
     class Config:
         from_attributes = True

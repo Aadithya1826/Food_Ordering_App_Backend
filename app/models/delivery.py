@@ -24,6 +24,7 @@ class DeliveryPartner(Base):
     current_latitude = Column(Float, nullable=True)
     current_longitude = Column(Float, nullable=True)
     last_location_at = Column(DateTime, nullable=True)
+    password_hash = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -99,3 +100,16 @@ class RiderBankDetail(Base):
     bank_name = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class RiderSession(Base):
+    __tablename__ = "rider_sessions"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    rider_id = Column(BigInteger, ForeignKey("delivery_partners.id"), index=True, nullable=False)
+    jti = Column(String(64), unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, default=False, nullable=False)
+
+    rider = relationship("DeliveryPartner")
+
