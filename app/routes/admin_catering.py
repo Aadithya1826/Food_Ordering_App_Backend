@@ -568,7 +568,12 @@ def get_admin_catering_orders(
     )
 
     if effective_restaurant_id is not None:
-        query = query.filter(CateringOrder.restaurant_id == effective_restaurant_id)
+        query = query.filter(
+            or_(
+                CateringOrder.restaurant_id == effective_restaurant_id,
+                CateringOrder.restaurant_id.is_(None)
+            )
+        )
 
     if order_status:
         query = query.filter(func.upper(CateringOrder.order_status) == order_status.upper())
@@ -591,9 +596,9 @@ def get_admin_catering_orders(
 
     result = []
     for order, customer in orders_with_customers:
-        cust_name = customer.name if customer else "Guest"
-        cust_phone = customer.phone if customer else "N/A"
-        cust_email = customer.email if customer else ""
+        cust_name = customer.name if (customer and customer.name) else "Guest"
+        cust_phone = customer.phone if (customer and customer.phone) else "N/A"
+        cust_email = customer.email if (customer and customer.email) else ""
 
         # Full-text search
         if search:
@@ -612,9 +617,13 @@ def get_admin_catering_orders(
         # Verified payments calculation
         verified_payments = [p for p in (order.payments or []) if p.payment_status == "SUCCESS"]
         verified_paid = sum(p.amount for p in verified_payments)
+        if verified_paid == 0.0 and float(order.paid_amount or 0.0) > 0.0:
+            verified_paid = float(order.paid_amount)
 
         # Real outstanding balance
         balance = max(0.0, float(order.total_amount or 0.0) - verified_paid)
+
+        serving_time_str = order.serving_time.strftime("%I:%M %p") if hasattr(order.serving_time, "strftime") else (str(order.serving_time) if order.serving_time else None)
 
         result.append({
             "id": order.id,
@@ -626,10 +635,10 @@ def get_admin_catering_orders(
             "restaurant_id": order.restaurant_id,
             "package_name": order.package_name,
             "package_code": order.package_code,
-            "package_price": order.package_price,
+            "package_price": float(order.package_price or 0.0),
             "event_name": order.event_name,
             "event_date": order.event_date.isoformat() if order.event_date else None,
-            "serving_time": order.serving_time,
+            "serving_time": serving_time_str,
             "occasion": order.occasion,
             "guest_count": order.guest_count,
             "service_type": order.service_type,
@@ -682,6 +691,8 @@ def get_admin_catering_order_detail(
     # Verified payments
     verified_payments = [p for p in (order.payments or []) if p.payment_status == "SUCCESS"]
     verified_paid = sum(p.amount for p in verified_payments)
+    if verified_paid == 0.0 and float(order.paid_amount or 0.0) > 0.0:
+        verified_paid = float(order.paid_amount)
     balance = max(0.0, float(order.total_amount or 0.0) - verified_paid)
 
     # Customization breakdown
@@ -748,15 +759,15 @@ def get_admin_catering_order_detail(
         },
         "customer": {
             "id": customer.id if customer else order.customer_id,
-            "name": customer.name if customer else "Guest",
-            "phone": customer.phone if customer else "N/A",
-            "email": customer.email if customer else "",
-            "address": customer.address if customer else ""
+            "name": customer.name if (customer and customer.name) else "Guest",
+            "phone": customer.phone if (customer and customer.phone) else "N/A",
+            "email": customer.email if (customer and customer.email) else "",
+            "address": customer.address if (customer and customer.address) else (order.delivery_address_snapshot or "")
         },
         "event": {
             "event_name": order.event_name,
             "event_date": order.event_date.isoformat() if order.event_date else None,
-            "serving_time": order.serving_time,
+            "serving_time": order.serving_time.strftime("%I:%M %p") if hasattr(order.serving_time, "strftime") else (str(order.serving_time) if order.serving_time else None),
             "occasion": order.occasion,
             "guest_count": order.guest_count,
             "service_type": order.service_type,
@@ -865,7 +876,12 @@ def get_admin_catering_reports(
 
     query = db.query(CateringOrder).options(joinedload(CateringOrder.payments))
     if effective_restaurant_id is not None:
-        query = query.filter(CateringOrder.restaurant_id == effective_restaurant_id)
+        query = query.filter(
+            or_(
+                CateringOrder.restaurant_id == effective_restaurant_id,
+                CateringOrder.restaurant_id.is_(None)
+            )
+        )
 
     if start_date:
         start_dt = datetime.datetime.combine(start_date, datetime.time.min)
@@ -888,12 +904,19 @@ def get_admin_catering_reports(
     verified_balances = 0.0
 
     for o in active_orders:
-        for p in (o.payments or []):
-            if p.payment_status == "SUCCESS":
+        order_payments = [p for p in (o.payments or []) if p.payment_status == "SUCCESS"]
+        if order_payments:
+            for p in order_payments:
                 if p.payment_type == "ADVANCE":
                     verified_advances += float(p.amount or 0.0)
                 elif p.payment_type == "BALANCE":
                     verified_balances += float(p.amount or 0.0)
+        else:
+            paid = float(o.paid_amount or 0.0)
+            adv = float(o.advance_amount or 0.0)
+            verified_advances += min(paid, adv)
+            if paid > adv:
+                verified_balances += (paid - adv)
 
     total_collected_revenue = verified_advances + verified_balances
     outstanding_receivables = max(0.0, total_booked_sales - total_collected_revenue)
