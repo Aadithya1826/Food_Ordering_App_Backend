@@ -15,3 +15,10 @@ from .catering import (
     CateringOrderAddon,
     CateringPayment
 )
+from .customer import (
+    Customer,
+    CustomerAddress,
+    LoyaltyTransaction,
+    CustomerFavorite,
+    CustomerOTPChallenge
+)

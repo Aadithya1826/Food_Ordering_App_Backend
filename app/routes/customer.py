@@ -1,9 +1,9 @@
-# pyrefly: ignore [missing-import]
-from fastapi import APIRouter, Depends, HTTPException
-# pyrefly: ignore [missing-import]
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_, and_, cast, String, text
+from decimal import Decimal, ROUND_HALF_UP
+
 # pyrefly: ignore [missing-import]
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from ..db import SessionLocal
 from ..models.menu import MenuCategory, MenuItem
 from ..models.restaurant import Restaurant
@@ -48,14 +48,35 @@ def get_db():
 from ..utils.phone import normalize_phone
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Customer Auth: separated Signup / Login / Check-phone
+# Customer Auth: Server-Issued OTP Challenges & Production-Safe Verification
 # ──────────────────────────────────────────────────────────────────────────────
+import secrets
+import uuid
+from datetime import timedelta
+import logging
+
+auth_logger = logging.getLogger(__name__)
+
+class CustomerRequestOtpPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    phone: str
+    purpose: Optional[str] = "LOGIN_SIGNUP"
+
+
+class CustomerVerifyOtpPayload(BaseModel):
+    model_config = {"extra": "ignore"}
+    phone: str
+    challenge_id: str
+    otp: str
+
 
 class CustomerSignupPayload(BaseModel):
     model_config = {"extra": "ignore"}
     phone: str
     name: str
     otp: Optional[str] = None
+    challenge_id: Optional[str] = None
+    verification_token: Optional[str] = None
 
 
 class CustomerLoginPayload(BaseModel):
@@ -63,6 +84,8 @@ class CustomerLoginPayload(BaseModel):
     phone: str
     name: Optional[str] = None   # kept for legacy callers; ignored for auth
     otp: Optional[str] = None
+    challenge_id: Optional[str] = None
+    verification_token: Optional[str] = None
 
 
 def _build_token(phone: str, customer_id: int) -> str:
@@ -88,12 +111,26 @@ def _customer_session(customer) -> dict:
     }
 
 
+def _hash_otp(phone: str, otp: str, challenge_id: str) -> str:
+    """Generate cryptographically secure HMAC hash for OTP challenge."""
+    from ..utils.auth import SECRET_KEY
+    msg = f"{phone}:{otp}:{challenge_id}"
+    return hmac.new(SECRET_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _is_legacy_stub_allowed() -> bool:
+    """Check if legacy stub OTP ('1234') is permitted during transition window."""
+    env = os.getenv("APP_ENV", "development").lower()
+    default_allowed = "true" if env != "production" else "false"
+    return os.getenv("ALLOW_LEGACY_STUB_OTP", default_allowed).lower() == "true"
+
+
 @router.post("/api/v1/public/customers/check-phone")
 def check_phone(payload: CustomerLoginPayload, db: Session = Depends(get_db)):
     """
     Check whether a phone number is already registered.
     Returns { customer_exists: bool } — does NOT create any record.
-    Use before signup to give the user an early "already registered" message.
+    Use before signup to give the user an early 'already registered' message.
     """
     from ..models.customer import Customer
 
@@ -105,27 +142,212 @@ def check_phone(payload: CustomerLoginPayload, db: Session = Depends(get_db)):
     return {"customer_exists": customer is not None, "phone": norm}
 
 
+@router.post("/api/v1/public/customers/auth/request-otp")
+def request_customer_otp(payload: CustomerRequestOtpPayload, db: Session = Depends(get_db)):
+    """
+    Issue a new single-use server OTP challenge with short expiration (5 mins),
+    attempt limits, and rate limiting.
+    """
+    from ..models.customer import CustomerOTPChallenge
+
+    norm = normalize_phone(payload.phone.strip())
+    if not norm:
+        raise HTTPException(status_code=422, detail="Invalid phone number")
+
+    now = datetime.utcnow()
+    # Rate limit: Max 5 challenges per phone per 10 minutes
+    ten_mins_ago = now - timedelta(minutes=10)
+    recent_count = db.query(CustomerOTPChallenge).filter(
+        CustomerOTPChallenge.phone == norm,
+        CustomerOTPChallenge.created_at >= ten_mins_ago
+    ).count()
+    if recent_count >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many OTP requests. Please wait a few minutes before trying again."
+        )
+
+    # Cooldown: Minimum 20s between OTP requests
+    twenty_secs_ago = now - timedelta(seconds=20)
+    latest = db.query(CustomerOTPChallenge).filter(
+        CustomerOTPChallenge.phone == norm
+    ).order_by(CustomerOTPChallenge.created_at.desc()).first()
+    if latest and latest.created_at >= twenty_secs_ago:
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait 20 seconds before requesting another OTP."
+        )
+
+    # Invalidate previous unused challenges for this phone
+    db.query(CustomerOTPChallenge).filter(
+        CustomerOTPChallenge.phone == norm,
+        CustomerOTPChallenge.is_used == False
+    ).update({"is_used": True})
+
+    # Generate cryptographically secure 6-digit OTP
+    otp_code = f"{secrets.randbelow(900000) + 100000:06d}"
+    challenge_id = f"otp_ch_{uuid.uuid4().hex}"
+    otp_hash = _hash_otp(norm, otp_code, challenge_id)
+    expires_at = now + timedelta(minutes=5)
+
+    challenge = CustomerOTPChallenge(
+        phone=norm,
+        challenge_id=challenge_id,
+        otp_hash=otp_hash,
+        purpose=payload.purpose or "LOGIN_SIGNUP",
+        attempts_left=3,
+        is_used=False,
+        expires_at=expires_at,
+        created_at=now
+    )
+    db.add(challenge)
+    db.commit()
+
+    # Log securely for dispatch (SMS gateway integration point)
+    auth_logger.info(f"[SECURE AUTH] Generated OTP challenge for {norm[-4:]}: challenge_id={challenge_id}")
+    if os.getenv("APP_ENV", "development").lower() != "production":
+        auth_logger.info(f"[DEV DEBUG OTP] Phone={norm} Code={otp_code}")
+
+    return {
+        "success": True,
+        "challenge_id": challenge_id,
+        "expires_in": 300,
+        "message": "OTP challenge generated successfully"
+    }
+
+
+@router.post("/api/v1/public/customers/auth/verify-otp")
+def verify_customer_otp(payload: CustomerVerifyOtpPayload, db: Session = Depends(get_db)):
+    """
+    Verify server-issued OTP challenge with attempt decrement, single-use,
+    and issue a temporary verified claim token.
+    """
+    from ..models.customer import CustomerOTPChallenge, Customer
+    from ..utils.auth import SECRET_KEY, ALGORITHM
+
+    norm = normalize_phone(payload.phone.strip())
+    if not norm:
+        raise HTTPException(status_code=422, detail="Invalid phone number")
+
+    challenge = db.query(CustomerOTPChallenge).filter(
+        CustomerOTPChallenge.challenge_id == payload.challenge_id,
+        CustomerOTPChallenge.phone == norm
+    ).with_for_update().first()
+
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Invalid OTP challenge or phone mismatch")
+
+    if challenge.is_used:
+        raise HTTPException(status_code=400, detail="This OTP challenge has already been used")
+
+    now = datetime.utcnow()
+    if now > challenge.expires_at:
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one")
+
+    if challenge.attempts_left <= 0:
+        raise HTTPException(status_code=400, detail="Too many failed attempts. Please request a new OTP")
+
+    clean_otp = payload.otp.strip()
+    expected_hash = _hash_otp(norm, clean_otp, challenge.challenge_id)
+    if not hmac.compare_digest(challenge.otp_hash, expected_hash):
+        challenge.attempts_left -= 1
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid OTP. {challenge.attempts_left} attempts remaining."
+        )
+
+    # Mark single-use challenge as used
+    challenge.is_used = True
+    db.commit()
+
+    # Issue signed verification token valid for 10 minutes
+    verification_token = jwt.encode({
+        "sub": norm,
+        "purpose": "OTP_VERIFIED",
+        "challenge_id": challenge.challenge_id,
+        "exp": int(time.time()) + 600
+    }, SECRET_KEY, algorithm=ALGORITHM)
+
+    existing_customer = db.query(Customer).filter(Customer.phone == norm).first()
+    return {
+        "success": True,
+        "phone": norm,
+        "verification_token": verification_token,
+        "customer_exists": existing_customer is not None,
+        "session": _customer_session(existing_customer) if existing_customer else None
+    }
+
+
+def _verify_auth_proof(norm_phone: str, payload: Any, db: Session) -> bool:
+    """
+    Verify authentication proof using:
+    1. verification_token (signed by server after verify-otp)
+    2. challenge_id + otp (validated on the fly)
+    3. Legacy Play Store client compatibility (ALLOW_LEGACY_STUB_OTP window)
+    """
+    from ..models.customer import CustomerOTPChallenge
+    from ..utils.auth import SECRET_KEY, ALGORITHM
+
+    # 1. Verification token check
+    v_token = getattr(payload, "verification_token", None)
+    if v_token:
+        try:
+            claims = jwt.decode(v_token, SECRET_KEY, algorithms=[ALGORITHM])
+            if claims.get("purpose") == "OTP_VERIFIED" and claims.get("sub") == norm_phone:
+                return True
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired verification token")
+
+    # 2. On-the-fly challenge check
+    c_id = getattr(payload, "challenge_id", None)
+    otp = getattr(payload, "otp", None)
+    if c_id and otp:
+        challenge = db.query(CustomerOTPChallenge).filter(
+            CustomerOTPChallenge.challenge_id == c_id,
+            CustomerOTPChallenge.phone == norm_phone
+        ).with_for_update().first()
+        if challenge and not challenge.is_used and datetime.utcnow() <= challenge.expires_at and challenge.attempts_left > 0:
+            expected_hash = _hash_otp(norm_phone, otp.strip(), c_id)
+            if hmac.compare_digest(challenge.otp_hash, expected_hash):
+                challenge.is_used = True
+                db.commit()
+                return True
+            else:
+                challenge.attempts_left -= 1
+                db.commit()
+                raise HTTPException(status_code=400, detail="Invalid OTP code")
+
+    # 3. Compatible rollout check for published Play Store client
+    if _is_legacy_stub_allowed() and otp == "1234":
+        return True
+
+    raise HTTPException(
+        status_code=400,
+        detail="Valid OTP verification required. Please request an OTP challenge."
+    )
+
+
 @router.post("/api/v1/public/customers/signup")
 def customer_signup(payload: CustomerSignupPayload, db: Session = Depends(get_db)):
     """
-    Register a NEW customer only.
+    Register a NEW customer only after verified authentication.
     - Normalizes the phone number.
+    - Requires verified OTP proof.
     - Returns HTTP 409 if an account already exists for this phone.
     - Creates a new customer and returns a session token.
-    - Frontend should NOT redirect the new user back to Login — they are already authenticated.
     """
     from ..models.customer import Customer
 
     if not payload.name or not payload.name.strip():
         raise HTTPException(status_code=422, detail="Name is required for signup")
 
-    # OTP validation (OTP-less stub: accept "1234")
-    if payload.otp and payload.otp != "1234":
-        raise HTTPException(status_code=400, detail="Invalid OTP")
-
     norm = normalize_phone(payload.phone.strip())
     if not norm:
         raise HTTPException(status_code=422, detail="Invalid phone number")
+
+    # Authenticate proof
+    _verify_auth_proof(norm, payload, db)
 
     existing = db.query(Customer).filter(Customer.phone == norm).first()
     if existing:
@@ -144,21 +366,20 @@ def customer_signup(payload: CustomerSignupPayload, db: Session = Depends(get_db
 @router.post("/api/v1/public/customers/login")
 def customer_login(payload: CustomerLoginPayload, db: Session = Depends(get_db)):
     """
-    Authenticate an EXISTING customer by phone number.
+    Authenticate an EXISTING customer by phone number after verified authentication.
     - Normalizes the phone number.
+    - Requires verified OTP proof.
     - Returns HTTP 404 if no account is found (does NOT create one).
     - Returns a session token for the existing customer.
-    Login must NEVER silently create a new customer.
     """
     from ..models.customer import Customer
-
-    # OTP validation (OTP-less stub: accept "1234")
-    if payload.otp and payload.otp != "1234":
-        raise HTTPException(status_code=400, detail="Invalid OTP")
 
     norm = normalize_phone(payload.phone.strip())
     if not norm:
         raise HTTPException(status_code=422, detail="Invalid phone number")
+
+    # Authenticate proof
+    _verify_auth_proof(norm, payload, db)
 
     customer = db.query(Customer).filter(Customer.phone == norm).first()
     if not customer:
@@ -168,6 +389,7 @@ def customer_login(payload: CustomerLoginPayload, db: Session = Depends(get_db))
         )
 
     return _customer_session(customer)
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -750,7 +972,7 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
             if not session_bill_no:
                 session_bill_no = next((o.bill_no for o in sibling_orders if o.bill_no), None)
             if not session_bill_no:
-                max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
                 session_bill_no = (max_bill_no or 0) + 1
 
             for o in sibling_orders:
@@ -766,19 +988,29 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
             order.payment_method = payload.payment_method or "Pay at Counter"
             order.status = "SERVED"
             if not order.bill_no:
-                max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
                 order.bill_no = (max_bill_no or 0) + 1
             session_bill_no = order.bill_no
 
         if payload.amount_paid is not None and payload.amount_paid > 0:
             final_settle_total = payload.amount_paid
-            order.total_amount = payload.amount_paid
+            if not order.dine_in_session_id:
+                order.total_amount = payload.amount_paid
         else:
             final_settle_total = sum(
                 float(o.total_amount or 0.0)
                 for o in sibling_orders
                 if (o.status or "").upper() != "CANCELLED"
             )
+
+        if order.dine_in_session_id:
+            session_obj = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+            if session_obj:
+                session_obj.status = "COMPLETED"
+                session_obj.payment_status = "Paid"
+                session_obj.total_amount = final_settle_total
+                session_obj.closed_at = datetime.utcnow()
+                session_obj.updated_at = datetime.utcnow()
 
         # Release table
         table_num = None
@@ -1015,11 +1247,13 @@ def get_dine_in_session_details(
         Order.restaurant_id == restaurant_id
     ).order_by(Order.id.asc()).all()
 
-    total_accumulated = sum(
-        float(o.total_amount or 0.0) 
-        for o in session_orders 
-        if (o.status or "").upper() != "CANCELLED"
-    )
+    active_orders = [o for o in session_orders if (o.status or "").upper() != "CANCELLED"]
+    total_accumulated = sum(float(o.total_amount or 0.0) for o in active_orders)
+    if session_orders and not active_orders and session_obj.status != "CANCELLED":
+        session_obj.status = "CANCELLED"
+        if table:
+            table.status = "Vacant"
+        db.commit()
 
     all_items_flat = []
     orders_data = []
@@ -1051,7 +1285,10 @@ def get_dine_in_session_details(
         })
 
     # Latest active order id (for primary tracking display)
-    latest_order = session_orders[-1] if session_orders else None
+    latest_order = active_orders[-1] if active_orders else (session_orders[-1] if session_orders else None)
+    latest_order_status = latest_order.status if latest_order else None
+    if not active_orders and session_orders:
+        latest_order_status = "CANCELLED"
 
     return {
         "success": True,
@@ -1064,7 +1301,7 @@ def get_dine_in_session_details(
         "totalAmount": total_accumulated,
         "latestOrderId": f"ORD-{str(latest_order.id).zfill(6)}" if latest_order else None,
         "latestDbOrderId": latest_order.id if latest_order else None,
-        "latestOrderStatus": latest_order.status if latest_order else None,
+        "latestOrderStatus": latest_order_status,
         "orders": orders_data,
         "allItems": all_items_flat
     }
@@ -1102,6 +1339,24 @@ def settle_dine_in_session(
             Order.dine_in_session_id == session_obj.id,
             Order.restaurant_id == restaurant_id
         ).with_for_update().all()
+
+        # Idempotency: A settled bill must not be settled again
+        if session_obj.status == "COMPLETED" and (session_obj.payment_status or "").lower() == "paid":
+            existing_bill_no = next((o.bill_no for o in session_orders if o.bill_no), None)
+            table = db.query(Table).filter(Table.id == session_obj.table_id).first()
+            table_num = table.table_number if table else "Table"
+            return {
+                "success": True,
+                "sessionId": session_obj.id,
+                "sessionUid": session_obj.session_uid,
+                "tableNumber": table_num,
+                "totalAmount": float(session_obj.total_amount or 0.0),
+                "bill_no": existing_bill_no,
+                "paymentStatus": "Paid",
+                "paymentMethod": getattr(session_obj, "payment_method", None) or payload.payment_method or "Pay at Counter",
+                "message": "Session already settled (idempotent response)"
+            }
+
 
         final_combined_total = sum(
             float(o.total_amount or 0.0) 
@@ -1191,16 +1446,25 @@ def settle_dine_in_session(
 
 
 class CancelOrderPayload(BaseModel):
+    model_config = {"extra": "ignore"}
     reason: Optional[str] = "Customer requested cancellation"
     phone: Optional[str] = None
+    session_uid: Optional[str] = None
 
 class CancelItemPayload(BaseModel):
+    model_config = {"extra": "ignore"}
     reason: Optional[str] = "Customer requested cancellation"
+    session_uid: Optional[str] = None
+
+def _to_decimal(val) -> Decimal:
+    if val is None:
+        return Decimal('0.00')
+    return Decimal(str(val))
 
 def _find_order_by_id_or_ref(db: Session, order_id_val: Any, restaurant_id: Optional[int] = None, for_update: bool = False, load_items: bool = False):
     """
-    Robustly locate an Order regardless of ID format (int, '35266', 'ORD-035266')
-    and handle multi-branch restaurant_id defaults safely without failing on branch mismatch.
+    Locate an Order by numeric PK or branch_order_id, strictly enforcing restaurant_id isolation.
+    Eliminates cross-restaurant fallback leaks.
     """
     clean_id = None
     s_val = str(order_id_val).strip()
@@ -1211,50 +1475,252 @@ def _find_order_by_id_or_ref(db: Session, order_id_val: Any, restaurant_id: Opti
         except Exception:
             clean_id = None
 
+    if clean_id is None:
+        return None
+
     q = db.query(Order)
     if load_items:
-        q = q.options(joinedload(Order.items).joinedload(OrderItem.menu_item))
+        q = q.options(selectinload(Order.items).selectinload(OrderItem.menu_item))
 
-    # 1. If restaurant_id provided and > 0, try exact match with restaurant_id first
-    if restaurant_id is not None and restaurant_id > 0 and clean_id is not None:
-        cand_q = q.filter(Order.id == clean_id, Order.restaurant_id == restaurant_id)
+    # 1. If restaurant_id is specified (> 0), strictly restrict to that restaurant.
+    if restaurant_id is not None and restaurant_id > 0:
+        cand_q = q.filter(
+            (Order.id == clean_id) | (Order.branch_order_id == clean_id),
+            Order.restaurant_id == restaurant_id
+        )
         if for_update:
             cand_q = cand_q.with_for_update()
-        cand = cand_q.first()
-        if cand:
-            return cand
+        return cand_q.first()
 
-    # 2. Match by clean numeric primary key across all branches (Order.id is unique PK)
-    if clean_id is not None:
-        cand_q = q.filter(Order.id == clean_id)
-        if for_update:
-            cand_q = cand_q.with_for_update()
-        cand = cand_q.first()
-        if cand:
-            return cand
+    # 2. If restaurant_id is omitted, match by unique global PK only
+    cand_q = q.filter(Order.id == clean_id)
+    if for_update:
+        cand_q = cand_q.with_for_update()
+    return cand_q.first()
 
-    # 3. Match by branch_order_id if restaurant_id is specified
-    if clean_id is not None and restaurant_id is not None and restaurant_id > 0:
-        cand_q = q.filter(Order.branch_order_id == clean_id, Order.restaurant_id == restaurant_id)
-        if for_update:
-            cand_q = cand_q.with_for_update()
-        cand = cand_q.first()
-        if cand:
-            return cand
+
+def resolve_order_caller(request: Request, db: Session) -> Optional[dict]:
+    """
+    Extract authenticated caller from Bearer token:
+    Returns {"type": "STAFF", "user": user} or {"type": "CUSTOMER", "customer": cust} or None.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    elif "access_token" in request.cookies:
+        token = request.cookies["access_token"]
+
+    if not token:
+        return None
+
+    from ..middleware.jwt_middleware import verify_jwt_token
+    try:
+        payload = verify_jwt_token(token)
+    except Exception:
+        return None
+
+    role = payload.get("role")
+    account_type = payload.get("account_type")
+
+    # 1. Staff check
+    if role in ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"] or account_type in ["STAFF", "ADMIN"]:
+        from ..middleware import get_user_from_token
+        try:
+            user = get_user_from_token(token, db)
+            if user:
+                return {"type": "STAFF", "user": user}
+        except Exception:
+            pass
+
+    # 2. Customer check
+    customer_id_str = str(payload.get("user_id") or payload.get("sub") or payload.get("id"))
+    if customer_id_str:
+        from ..models.customer import Customer
+        if customer_id_str.startswith("+") or not customer_id_str.isdigit():
+            cust = db.query(Customer).filter(Customer.phone == customer_id_str).first()
+        else:
+            cust = db.query(Customer).filter(Customer.id == int(customer_id_str)).first()
+        if cust:
+            return {"type": "CUSTOMER", "customer": cust}
 
     return None
+
+
+def authorize_order_access_for_cancellation(
+    order: Order,
+    caller: Optional[dict],
+    session_uid: Optional[str],
+    restaurant_id: Optional[int],
+    db: Session
+):
+    """
+    Enforce strict cancellation authorization:
+    - Customer must own CUSTOMER_APP order.
+    - Cashier POS orders cannot be cancelled by customer.
+    - Dine-In guests require validated session_uid.
+    - Cross-customer and cross-restaurant cancellations are rejected.
+    """
+    # Cross-restaurant check
+    if restaurant_id and order.restaurant_id != restaurant_id:
+        raise HTTPException(status_code=403, detail="Cross-restaurant cancellation prohibited")
+
+    # 1. Staff access
+    if caller and caller.get("type") == "STAFF":
+        from ..utils.roles import require_restaurant_access
+        user = caller["user"]
+        require_restaurant_access(user, order.restaurant_id)
+        return
+
+    # 2. Authenticated Customer
+    if caller and caller.get("type") == "CUSTOMER":
+        cust = caller["customer"]
+        # Cashier POS isolation
+        if getattr(order, "order_source", None) == "CASHIER_POS":
+            raise HTTPException(
+                status_code=403,
+                detail="Cancellation unavailable for orders placed directly at the cashier counter."
+            )
+
+        cust_phone = normalize_phone(cust.phone)
+        order_phone = normalize_phone(order.customer_phone) if order.customer_phone else None
+
+        is_owner = False
+        if order_phone and cust_phone and order_phone == cust_phone:
+            is_owner = True
+        elif order.user_id == cust.id:
+            is_owner = True
+        elif order.dine_in_session_id:
+            sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+            if sess and sess.customer_phone and normalize_phone(sess.customer_phone) == cust_phone:
+                is_owner = True
+
+        if not is_owner:
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized: You do not have permission to manage this order"
+            )
+        return
+
+    # 3. Dine-In Guest with validated session_uid
+    if session_uid and order.dine_in_session_id:
+        sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+        if sess and sess.session_uid == session_uid and sess.restaurant_id == order.restaurant_id:
+            if getattr(order, "order_source", None) == "CASHIER_POS":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cancellation unavailable for orders placed directly at the cashier counter."
+                )
+            return
+
+    # 4. Unauthorized
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required to manage or cancel this order"
+    )
+
+
+def recalculate_order_financials(order: Order, db: Session) -> Decimal:
+    """
+    Authoritative recalculation of order totals, proportional GST, and discounts
+    using Decimal financial precision.
+    """
+    all_items = order.items or []
+    active_items = [
+        oi for oi in all_items 
+        if (getattr(oi, "status", None) or "PENDING").upper() != "CANCELLED"
+    ]
+
+    # If all items are cancelled, cancel whole order
+    if not active_items:
+        order.status = "CANCELLED"
+        order.total_amount = 0.0
+        order.delivery_fee = 0.0
+        order.packaging_fee = 0.0
+        order.tip_amount = 0.0
+        order.gst_amount = 0.0
+        order.discount_amount = 0.0
+        return Decimal('0.00')
+
+    # Sum active items
+    new_items_subtotal = Decimal('0.00')
+    for oi in active_items:
+        price = _to_decimal(oi.price)
+        qty = _to_decimal(oi.quantity or 1)
+        new_items_subtotal += price * qty
+
+    # Calculate original items subtotal to compute proportional GST/discount
+    original_subtotal = Decimal('0.00')
+    for oi in all_items:
+        original_subtotal += _to_decimal(oi.price) * _to_decimal(oi.quantity or 1)
+
+    # Proportional GST adjustment
+    if original_subtotal > Decimal('0.00') and order.gst_amount:
+        effective_gst_rate = _to_decimal(order.gst_amount) / original_subtotal
+        new_gst = (new_items_subtotal * effective_gst_rate).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    else:
+        new_gst = Decimal('0.00')
+
+    # Proportional discount adjustment
+    if original_subtotal > Decimal('0.00') and order.discount_amount and order.discount_amount > 0:
+        discount_ratio = _to_decimal(order.discount_amount) / original_subtotal
+        new_discount = (new_items_subtotal * discount_ratio).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    else:
+        new_discount = Decimal('0.00')
+
+    delivery_fee = _to_decimal(order.delivery_fee)
+    packaging_fee = _to_decimal(order.packaging_fee)
+    tip_amount = _to_decimal(order.tip_amount)
+
+    new_total = new_items_subtotal + delivery_fee + packaging_fee + tip_amount + new_gst - new_discount
+    if new_total < Decimal('0.00'):
+        new_total = Decimal('0.00')
+
+    new_total_rounded = new_total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    order.total_amount = float(new_total_rounded)
+    order.gst_amount = float(new_gst)
+    order.discount_amount = float(new_discount)
+
+    # Dine-In session update
+    norm_type = (order.order_type or "").upper().replace(" ", "_")
+    if norm_type in ["DINE_IN", "DINEIN"] and order.dine_in_session_id:
+        sess = db.query(DineInSession).filter(
+            DineInSession.id == order.dine_in_session_id
+        ).with_for_update().first()
+        if sess:
+            remaining_orders = db.query(Order).filter(
+                Order.dine_in_session_id == sess.id,
+                Order.status != "CANCELLED"
+            ).all()
+            session_total = Decimal('0.00')
+            for ro in remaining_orders:
+                session_total += _to_decimal(ro.total_amount)
+            sess.total_amount = float(session_total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+            if not remaining_orders:
+                sess.status = "CANCELLED"
+                table = db.query(Table).filter(Table.id == sess.table_id).first()
+                if table:
+                    table.status = "Vacant"
+            sess.updated_at = datetime.utcnow()
+
+    return new_total_rounded
 
 
 @router.get("/api/orders/{order_id}/cancellation-eligibility")
 @router.get("/api/v1/orders/{order_id}/cancellation-eligibility")
 def check_cancellation_eligibility(
     order_id: str,
+    request: Request,
     restaurant_id: Optional[int] = None,
+    session_uid: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
+    caller = resolve_order_caller(request, db)
     order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=False, load_items=True)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    authorize_order_access_for_cancellation(order, caller, session_uid, restaurant_id, db)
 
     order_status = (order.status or "").upper()
     is_blocked = order_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"] or any(
@@ -1291,21 +1757,24 @@ def check_cancellation_eligibility(
 @router.post("/api/v1/orders/{order_id}/cancel")
 def cancel_order(
     order_id: str,
+    request: Request,
     payload: CancelOrderPayload = CancelOrderPayload(),
     restaurant_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
     Cancel an order before kitchen preparation begins.
-    Applies strictly to DINE_IN, TAKEAWAY, and DELIVERY.
-    Blocks cancellation if status is PREPARING, READY, SERVED, etc. (HTTP 409).
+    Enforces authorization, concurrency locking, and status transitions.
     """
     try:
-        # Concurrency safety: row-level lock on order
-        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True)
+        caller = resolve_order_caller(request, db)
+        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True, load_items=True)
 
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        # Authorize caller
+        authorize_order_access_for_cancellation(order, caller, payload.session_uid, restaurant_id, db)
 
         curr_status = (order.status or "").upper()
         if curr_status == "CANCELLED":
@@ -1332,13 +1801,49 @@ def cancel_order(
                     detail="Cancellation unavailable. The kitchen has already started preparing this order."
                 )
 
+        norm_type = (order.order_type or "").upper().replace(" ", "_")
+
+        # Delivery assignment safety check
+        if norm_type == "DELIVERY":
+            from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory, DeliveryPartner
+            da = db.query(DeliveryAssignment).filter(DeliveryAssignment.order_id == order.id).with_for_update().first()
+            if da:
+                if da.status in ["PICKED_UP", "ON_THE_WAY", "ARRIVED_CUSTOMER", "DELIVERED"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cancellation unavailable. The order is already picked up for delivery."
+                    )
+                if da.status not in ["DELIVERED", "CANCELLED"]:
+                    da.status = "CANCELLED"
+                    da.updated_at = datetime.utcnow()
+                    # Only mark rider available if they have no other active assignments
+                    if da.rider_id:
+                        other_active = db.query(DeliveryAssignment).filter(
+                            DeliveryAssignment.rider_id == da.rider_id,
+                            DeliveryAssignment.id != da.id,
+                            DeliveryAssignment.status.in_(["ASSIGNED", "ACCEPTED", "PICKED_UP", "ON_THE_WAY"])
+                        ).first()
+                        if not other_active:
+                            rider = db.query(DeliveryPartner).filter(DeliveryPartner.id == da.rider_id).first()
+                            if rider and rider.is_online:
+                                rider.is_available = True
+                                rider.updated_at = datetime.utcnow()
+                    history = DeliveryStatusHistory(
+                        order_id=order.id,
+                        delivery_assignment_id=da.id,
+                        rider_id=da.rider_id,
+                        status="CANCELLED",
+                        notes=payload.reason or "Order cancelled before preparation"
+                    )
+                    db.add(history)
+            order.delivery_status = "CANCELLED"
+
         # Proceed with cancellation
         order.status = "CANCELLED"
         for oi in order.items:
             oi.status = "CANCELLED"
 
-        # Dine-In session handling: update combined bill
-        norm_type = (order.order_type or "").upper().replace(" ", "_")
+        # Dine-In session handling
         if norm_type in ["DINE_IN", "DINEIN"] and order.dine_in_session_id:
             sess = db.query(DineInSession).filter(
                 DineInSession.id == order.dine_in_session_id
@@ -1350,16 +1855,12 @@ def cancel_order(
                     Order.status != "CANCELLED"
                 ).all()
                 sess.total_amount = sum(float(ro.total_amount or 0.0) for ro in remaining_orders)
+                if not remaining_orders:
+                    sess.status = "CANCELLED"
+                    table = db.query(Table).filter(Table.id == sess.table_id).first()
+                    if table:
+                        table.status = "Vacant"
                 sess.updated_at = datetime.utcnow()
-
-        # Delivery handling
-        if norm_type == "DELIVERY":
-            from ..models.delivery import DeliveryAssignment
-            da = db.query(DeliveryAssignment).filter(DeliveryAssignment.order_id == order.id).first()
-            if da and da.status not in ["DELIVERED", "CANCELLED"]:
-                da.status = "CANCELLED"
-                da.updated_at = datetime.utcnow()
-            order.delivery_status = "CANCELLED"
 
         # Prepaid handling
         if (order.payment_status or "").upper() == "PAID":
@@ -1389,18 +1890,23 @@ def cancel_order(
 def cancel_order_item(
     order_id: str,
     item_id: int,
+    request: Request,
     payload: CancelItemPayload = CancelItemPayload(),
     restaurant_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
     Item-level cancellation before kitchen preparation starts.
+    Authoritative recalculation with Decimal financial precision.
     """
     try:
-        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True)
+        caller = resolve_order_caller(request, db)
+        order = _find_order_by_id_or_ref(db, order_id, restaurant_id, for_update=True, load_items=True)
 
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
+
+        authorize_order_access_for_cancellation(order, caller, payload.session_uid, restaurant_id, db)
 
         curr_status = (order.status or "").upper()
         if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"]:
@@ -1425,27 +1931,12 @@ def cancel_order_item(
             )
 
         item.status = "CANCELLED"
-        deducted = float(item.price) * float(item.quantity)
-        order.total_amount = max(0.0, float(order.total_amount or 0.0) - deducted)
 
-        # If all items are cancelled, mark the entire order as CANCELLED
-        active_items = [oi for oi in order.items if (getattr(oi, "status", None) or "").upper() != "CANCELLED"]
-        if not active_items:
-            order.status = "CANCELLED"
+        # Authoritative recalculation of all financial fields
+        recalculate_order_financials(order, db)
 
-        # Dine-In session update
-        norm_type = (order.order_type or "").upper().replace(" ", "_")
-        if norm_type in ["DINE_IN", "DINEIN"] and order.dine_in_session_id:
-            sess = db.query(DineInSession).filter(
-                DineInSession.id == order.dine_in_session_id
-            ).with_for_update().first()
-            if sess:
-                remaining_orders = db.query(Order).filter(
-                    Order.dine_in_session_id == sess.id,
-                    Order.status != "CANCELLED"
-                ).all()
-                sess.total_amount = sum(float(ro.total_amount or 0.0) for ro in remaining_orders)
-                sess.updated_at = datetime.utcnow()
+        if (order.payment_status or "").upper() == "PAID":
+            order.payment_status = "REFUND_PENDING"
 
         order.updated_at = datetime.utcnow()
         db.commit()
@@ -1465,6 +1956,7 @@ def cancel_order_item(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @router.get("/api/razorpay-key")
@@ -1523,10 +2015,12 @@ def verify_payment(payload: RazorpayVerifyPayload, db: Session = Depends(get_db)
             hashlib.sha256
         ).hexdigest()
 
-        if payload.razorpay_signature == expected_sign:
+        if hmac.compare_digest(payload.razorpay_signature, expected_sign):
             if payload.order_id:
-                order = db.query(Order).filter(Order.id == payload.order_id).first()
+                order = db.query(Order).filter(Order.id == payload.order_id).with_for_update().first()
                 if order:
+                    if (order.payment_status or "").upper() == "PAID":
+                        return {"success": True, "message": "Payment already confirmed (idempotent)"}
                     order.payment_status = "Paid"
                     order.payment_method = "Razorpay"
                     order.status = "CONFIRMED" if order.status == "PENDING" else order.status
@@ -1534,6 +2028,7 @@ def verify_payment(payload: RazorpayVerifyPayload, db: Session = Depends(get_db)
             return {"success": True, "message": "Payment verified successfully"}
         else:
             raise HTTPException(status_code=400, detail="Invalid signature sent!")
+
     except HTTPException:
         db.rollback()
         raise
@@ -1581,7 +2076,13 @@ def get_public_table_status(table_number: str, restaurant_id: int = 1, db: Sessi
         "status": getattr(table, "status", "Vacant") or "Vacant"
     }
 @router.get("/api/orders/{order_id}")
-def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
+def get_order_by_id(
+    order_id: str, 
+    request: Request,
+    restaurant_id: Optional[int] = None, 
+    session_uid: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     try:
         if order_id.startswith("ORD-"):
             parsed_id = int(order_id.replace("ORD-", ""))
@@ -1595,30 +2096,47 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
     order_query = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(Order.id == parsed_id)
-    order = order_query.filter(Order.restaurant_id == restaurant_id).first() if restaurant_id else None
-    if not order:
+    
+    # Strictly enforce restaurant isolation: Never fall back cross-branch if restaurant_id is provided
+    if restaurant_id is not None and restaurant_id > 0:
+        order = order_query.filter(Order.restaurant_id == restaurant_id).first()
+    else:
         order = order_query.first()
+
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    restaurant_id = order.restaurant_id
+    # Order lookup authorization
+    caller = resolve_order_caller(request, db)
+    if caller and caller.get("type") == "CUSTOMER":
+        cust = caller["customer"]
+        cust_phone = normalize_phone(cust.phone)
+        order_phone = normalize_phone(order.customer_phone) if order.customer_phone else None
+        if order_phone and cust_phone and order_phone != cust_phone and order.user_id != cust.id:
+            is_sess_match = False
+            if order.dine_in_session_id:
+                sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+                if sess and sess.customer_phone and normalize_phone(sess.customer_phone) == cust_phone:
+                    is_sess_match = True
+            if not is_sess_match:
+                raise HTTPException(status_code=403, detail="Unauthorized: Access to this order is denied")
+    elif not caller:
+        # Cashier POS orders must not leak to unauthenticated public callers
+        if getattr(order, "order_source", None) == "CASHIER_POS":
+            if not session_uid or not order.dine_in_session_id:
+                raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
+            sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+            if not sess or sess.session_uid != session_uid or sess.restaurant_id != order.restaurant_id:
+                raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
 
+    restaurant_id = order.restaurant_id
     table_number_map = build_table_number_map(db, [order])
+
 
     # If this order belongs to a settled bill or dine-in session, aggregate all active sibling orders
     sibling_orders = [order]
     if (order.status or "").upper() != "CANCELLED":
-        if order.bill_no:
-            sibling_orders = db.query(Order).options(
-                joinedload(Order.items).joinedload(OrderItem.menu_item)
-            ).filter(
-                Order.bill_no == order.bill_no,
-                Order.restaurant_id == restaurant_id,
-                Order.status != "CANCELLED"
-            ).order_by(Order.id.asc()).all()
-            if not sibling_orders:
-                sibling_orders = [order]
-        elif order.dine_in_session_id:
+        if order.dine_in_session_id:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
@@ -1628,26 +2146,50 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
             ).order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
+        elif order.bill_no:
+            order_date = order.created_at.date() if order.created_at else None
+            q = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.bill_no == order.bill_no,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            )
+            if order_date:
+                q = q.filter(func.date(Order.created_at) == order_date)
+            sibling_orders = q.order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
 
     items = []
-    combined_total = 0.0
+    items_subtotal = 0.0
     for ord_obj in sibling_orders:
-        combined_total += float(ord_obj.total_amount or 0.0)
         for oi in (ord_obj.items or []):
             oi_status = getattr(oi, "status", None) or ("CANCELLED" if (ord_obj.status or "").upper() == "CANCELLED" else "PENDING")
             if (ord_obj.status or "").upper() != "CANCELLED" and oi_status == "CANCELLED":
                 continue
+            qty = float(oi.quantity or 1)
+            price = float(oi.price or 0.0)
+            items_subtotal += price * qty
             items.append({
                 "id": oi.id,
                 "order_id": oi.order_id,
                 "menu_item_id": oi.menu_item_id,
                 "quantity": oi.quantity,
-                "price": float(oi.price),
+                "price": price,
                 "name": oi.menu_item.name if oi.menu_item else None,
                 "description": oi.menu_item.description if oi.menu_item else None,
                 "image_url": oi.menu_item.image_url if oi.menu_item else None,
                 "status": oi_status
             })
+
+    total_delivery_fee = sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_packaging_fee = sum(float(getattr(o, "packaging_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_tip_amount = sum(float(getattr(o, "tip_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_discount_amount = sum(float(getattr(o, "discount_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_gst_amount = sum(float(getattr(o, "gst_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+
+    calculated_combined_total = round(max(0.0, items_subtotal + total_delivery_fee + total_packaging_fee + total_tip_amount + total_gst_amount - total_discount_amount), 2)
         
     order_dict = {
         "id": order.id,
@@ -1660,7 +2202,14 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,
-        "total_amount": combined_total if len(sibling_orders) > 1 else order.total_amount,
+        "subtotal": round(items_subtotal, 2),
+        "delivery_fee": round(total_delivery_fee, 2),
+        "packaging_fee": round(total_packaging_fee, 2),
+        "tip_amount": round(total_tip_amount, 2),
+        "discount_amount": round(total_discount_amount, 2),
+        "discount_code": order.discount_code,
+        "gst_amount": round(total_gst_amount, 2),
+        "total_amount": calculated_combined_total,
         "created_at": order.created_at,
         "updated_at": order.updated_at
     }
@@ -1673,8 +2222,14 @@ def get_order_by_id(order_id: str, restaurant_id: int = 1, db: Session = Depends
 # ──────────────────────────────────────────────
 
 @router.get("/api/v1/public/orders/{order_id}")
-def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Session = Depends(get_db)):
-    """Same as /api/orders/{order_id} but accessible without auth."""
+def get_public_order(
+    order_id: str, 
+    request: Request,
+    restaurant_id: Optional[int] = None, 
+    session_uid: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Fetch order details with authorization checks and strict branch isolation."""
     try:
         if order_id.startswith("ORD-"):
             parsed_id = int(order_id.replace("ORD-", ""))
@@ -1688,11 +2243,38 @@ def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Ses
     order_query = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(Order.id == parsed_id)
-    order = order_query.filter(Order.restaurant_id == restaurant_id).first() if restaurant_id else None
-    if not order:
+    
+    # Strictly enforce restaurant isolation
+    if restaurant_id is not None and restaurant_id > 0:
+        order = order_query.filter(Order.restaurant_id == restaurant_id).first()
+    else:
         order = order_query.first()
+
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # Authorize lookup
+    caller = resolve_order_caller(request, db)
+    if caller and caller.get("type") == "CUSTOMER":
+        cust = caller["customer"]
+        cust_phone = normalize_phone(cust.phone)
+        order_phone = normalize_phone(order.customer_phone) if order.customer_phone else None
+        if order_phone and cust_phone and order_phone != cust_phone and order.user_id != cust.id:
+            is_sess_match = False
+            if order.dine_in_session_id:
+                sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+                if sess and sess.customer_phone and normalize_phone(sess.customer_phone) == cust_phone:
+                    is_sess_match = True
+            if not is_sess_match:
+                raise HTTPException(status_code=403, detail="Unauthorized: Access to this order is denied")
+    elif not caller:
+        # Counter POS orders must never leak to unauthenticated public callers
+        if getattr(order, "order_source", None) == "CASHIER_POS":
+            if not session_uid or not order.dine_in_session_id:
+                raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
+            sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+            if not sess or sess.session_uid != session_uid or sess.restaurant_id != order.restaurant_id:
+                raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
 
     restaurant_id = order.restaurant_id
 
@@ -1700,17 +2282,7 @@ def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Ses
 
     sibling_orders = [order]
     if (order.status or "").upper() != "CANCELLED":
-        if order.bill_no:
-            sibling_orders = db.query(Order).options(
-                joinedload(Order.items).joinedload(OrderItem.menu_item)
-            ).filter(
-                Order.bill_no == order.bill_no,
-                Order.restaurant_id == restaurant_id,
-                Order.status != "CANCELLED"
-            ).order_by(Order.id.asc()).all()
-            if not sibling_orders:
-                sibling_orders = [order]
-        elif order.dine_in_session_id:
+        if order.dine_in_session_id:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
@@ -1720,26 +2292,50 @@ def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Ses
             ).order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
+        elif order.bill_no:
+            order_date = order.created_at.date() if order.created_at else None
+            q = db.query(Order).options(
+                joinedload(Order.items).joinedload(OrderItem.menu_item)
+            ).filter(
+                Order.bill_no == order.bill_no,
+                Order.restaurant_id == restaurant_id,
+                Order.status != "CANCELLED"
+            )
+            if order_date:
+                q = q.filter(func.date(Order.created_at) == order_date)
+            sibling_orders = q.order_by(Order.id.asc()).all()
+            if not sibling_orders:
+                sibling_orders = [order]
 
     items = []
-    combined_total = 0.0
+    items_subtotal = 0.0
     for ord_obj in sibling_orders:
-        combined_total += float(ord_obj.total_amount or 0.0)
         for oi in (ord_obj.items or []):
             oi_status = getattr(oi, "status", None) or ("CANCELLED" if (ord_obj.status or "").upper() == "CANCELLED" else "PENDING")
             if (ord_obj.status or "").upper() != "CANCELLED" and oi_status == "CANCELLED":
                 continue
+            qty = float(oi.quantity or 1)
+            price = float(oi.price or 0.0)
+            items_subtotal += price * qty
             items.append({
                 "id": oi.id,
                 "order_id": oi.order_id,
                 "menu_item_id": oi.menu_item_id,
                 "quantity": oi.quantity,
-                "price": float(oi.price),
+                "price": price,
                 "name": oi.menu_item.name if oi.menu_item else None,
                 "description": oi.menu_item.description if oi.menu_item else None,
                 "image_url": oi.menu_item.image_url if oi.menu_item else None,
                 "status": oi_status
             })
+
+    total_delivery_fee = sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_packaging_fee = sum(float(getattr(o, "packaging_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_tip_amount = sum(float(getattr(o, "tip_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_discount_amount = sum(float(getattr(o, "discount_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    total_gst_amount = sum(float(getattr(o, "gst_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+
+    calculated_combined_total = round(max(0.0, items_subtotal + total_delivery_fee + total_packaging_fee + total_tip_amount + total_gst_amount - total_discount_amount), 2)
 
     order_dict = {
         "id": order.id,
@@ -1755,7 +2351,14 @@ def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Ses
         "status": order.status,
         "payment_method": order.payment_method,
         "payment_status": order.payment_status,
-        "total_amount": combined_total if len(sibling_orders) > 1 else order.total_amount,
+        "subtotal": round(items_subtotal, 2),
+        "delivery_fee": round(total_delivery_fee, 2),
+        "packaging_fee": round(total_packaging_fee, 2),
+        "tip_amount": round(total_tip_amount, 2),
+        "discount_amount": round(total_discount_amount, 2),
+        "discount_code": order.discount_code,
+        "gst_amount": round(total_gst_amount, 2),
+        "total_amount": calculated_combined_total,
         "created_at": order.created_at,
         "updated_at": order.updated_at,
     }
@@ -1763,21 +2366,30 @@ def get_public_order(order_id: str, restaurant_id: Optional[int] = None, db: Ses
 
 
 @router.get("/api/v1/public/customers/orders")
-def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
-    """Return all online customer orders for a customer identified by phone number.
-    Excludes internal cashier / POS counter orders."""
-    # pyrefly: ignore [missing-import]
-    from sqlalchemy.orm import joinedload
-    # pyrefly: ignore [missing-import]
-    from sqlalchemy import or_
-
+def get_customer_orders_by_phone(
+    phone: str, 
+    restaurant_id: int = 1, 
+    current_customer: Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db)
+):
+    """
+    Return all online customer orders for the authenticated customer only.
+    Excludes internal cashier / POS counter orders and enforces strict privacy.
+    """
     clean_phone = phone.strip() if phone else ""
     if not clean_phone:
         return []
 
-    # Strip non-digits for flexible matching (e.g. +91 9876543210 -> 9876543210)
+    norm_req = normalize_phone(clean_phone)
+    norm_curr = normalize_phone(current_customer.phone)
+    if not norm_req or not norm_curr or norm_req != norm_curr:
+        raise HTTPException(
+            status_code=403, 
+            detail="Unauthorized: Cannot access order history of another customer"
+        )
+
     raw_digits = "".join(ch for ch in clean_phone if ch.isdigit())
-    if len(raw_digits) < 10 or raw_digits[-10:] in ["1234567890", "9876543210"]:
+    if len(raw_digits) < 10:
         return []
     last_10 = raw_digits[-10:]
 
@@ -1786,18 +2398,21 @@ def get_customer_orders_by_phone(phone: str, restaurant_id: int = 1, db: Session
         Order.customer_phone == last_10,
         Order.customer_phone == f"+91{last_10}",
         Order.customer_phone == f"+91 {last_10}",
+        Order.customer_phone == norm_curr,
     ]
 
     orders = (
         db.query(Order)
         .options(joinedload(Order.items).joinedload(OrderItem.menu_item))
         .filter(Order.restaurant_id == restaurant_id)
+        .filter(or_(Order.order_source == "CUSTOMER_APP", Order.order_source.is_(None)))
         .filter(Order.customer_phone.isnot(None))
         .filter(or_(*filters))
         .order_by(Order.created_at.desc())
         .limit(50)
         .all()
     )
+
 
     table_number_map = build_table_number_map(db, orders)
     result = []

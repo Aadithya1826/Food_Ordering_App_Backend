@@ -78,3 +78,22 @@ class CustomerFavorite(Base):
     __table_args__ = (
         UniqueConstraint("customer_id", "menu_item_id", name="uq_customer_favorite"),
     )
+
+
+class CustomerOTPChallenge(Base):
+    """
+    Server-issued OTP challenges with expiration, attempt limits,
+    salted hash storage, and replay/single-use protection.
+    """
+    __tablename__ = "customer_otp_challenges"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(32), index=True, nullable=False)
+    challenge_id = Column(String(64), unique=True, index=True, nullable=False)
+    otp_hash = Column(String(128), nullable=False)
+    purpose = Column(String(32), default="LOGIN_SIGNUP", nullable=False)
+    attempts_left = Column(Integer, default=3, nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
