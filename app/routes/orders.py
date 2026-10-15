@@ -70,13 +70,28 @@ def get_live_orders(
         # If SERVED, it's typically paid. If PENDING, maybe pending.
         p_status = o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED"] else "Pending")
 
-        # Resolve customer name
+        # Resolve customer name and phone
         customer_name = o.customer_phone or "Guest"
+        customer_phone = o.customer_phone or ""
         if o.customer_phone:
             from ..models.customer import Customer
             cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
             if cust and cust.name:
                 customer_name = cust.name
+
+        # Fallback to delivery_address_snapshot
+        if (not customer_name or customer_name in ["Guest", customer_phone]) and o.delivery_address_snapshot:
+            try:
+                import json
+                raw_addr = json.loads(o.delivery_address_snapshot) if isinstance(o.delivery_address_snapshot, str) else o.delivery_address_snapshot
+                if isinstance(raw_addr, dict):
+                    addr_name = raw_addr.get("contact_name") or raw_addr.get("name")
+                    if addr_name:
+                        customer_name = addr_name
+                    if not customer_phone:
+                        customer_phone = raw_addr.get("contact_phone") or raw_addr.get("phone") or ""
+            except Exception:
+                pass
 
         response.append({
             "order_id": o.id,
@@ -90,7 +105,7 @@ def get_live_orders(
             "created_at": o.created_at,
             "items": items,
             "order_type": o.order_type,
-            "customer_phone": o.customer_phone,
+            "customer_phone": customer_phone or o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
             "dine_in_session_id": o.dine_in_session_id,
@@ -231,13 +246,28 @@ def get_all_orders(
         # If SERVED, it's typically paid. If PENDING, maybe pending.
         p_status = o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED"] else "Pending")
 
-        # Resolve customer name
+        # Resolve customer name and phone
         customer_name = o.customer_phone or "Guest"
+        customer_phone = o.customer_phone or ""
         if o.customer_phone:
             from ..models.customer import Customer
             cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
             if cust and cust.name:
                 customer_name = cust.name
+
+        # Fallback to delivery_address_snapshot
+        if (not customer_name or customer_name in ["Guest", customer_phone]) and o.delivery_address_snapshot:
+            try:
+                import json
+                raw_addr = json.loads(o.delivery_address_snapshot) if isinstance(o.delivery_address_snapshot, str) else o.delivery_address_snapshot
+                if isinstance(raw_addr, dict):
+                    addr_name = raw_addr.get("contact_name") or raw_addr.get("name")
+                    if addr_name:
+                        customer_name = addr_name
+                    if not customer_phone:
+                        customer_phone = raw_addr.get("contact_phone") or raw_addr.get("phone") or ""
+            except Exception:
+                pass
 
         response.append({
             "order_id": o.id,
@@ -251,7 +281,7 @@ def get_all_orders(
             "created_at": o.created_at,
             "items": items,
             "order_type": o.order_type,
-            "customer_phone": o.customer_phone,
+            "customer_phone": customer_phone or o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
             "dine_in_session_id": o.dine_in_session_id,
