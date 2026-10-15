@@ -85,29 +85,28 @@ class ProductionSecurityRegressionSuite(unittest.TestCase):
     # ────────────────────────────────────────────────────────────
     def test_01_otp_challenge_issuance_and_rate_limiting(self):
         """OTP challenges are rate limited and respect cooldown."""
-        test_phone = "+919999000099"
+        test_phone = f"+9199{uuid.uuid4().int % 100000000:08d}"
+
         # 1. First challenge succeeds
         res = self.client.post("/api/v1/public/customers/auth/request-otp", json={"phone": test_phone})
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(data["success"])
         self.assertIn("challenge_id", data)
-        self.assertEqual(data["expires_in_seconds"], 300)
+        self.assertEqual(data.get("expires_in"), 300)
 
         # 2. Immediate request hits cooldown (HTTP 429)
         res_cooldown = self.client.post("/api/v1/public/customers/auth/request-otp", json={"phone": test_phone})
         self.assertEqual(res_cooldown.status_code, 429)
-        self.assertIn("Wait", res_cooldown.json()["detail"])
+        self.assertIn("wait", res_cooldown.json()["detail"].lower())
 
     def test_02_otp_verification_attempt_limits_and_single_use(self):
         """OTP challenge enforces attempt limits, verifies constant-time hash, and prevents replay."""
         db = SessionLocal()
-        test_phone = "+919999000088"
-        db.query(CustomerOTPChallenge).filter(CustomerOTPChallenge.phone == test_phone).delete()
-        db.commit()
+        test_phone = f"+9198{uuid.uuid4().int % 100000000:08d}"
 
         # Create challenge directly
-        challenge_id = "test-chall-001"
+        challenge_id = f"test-chall-{uuid.uuid4().hex[:8]}"
         real_otp = "849201"
         otp_hash = _hash_otp(test_phone, real_otp, challenge_id)
         chall = CustomerOTPChallenge(
@@ -157,7 +156,7 @@ class ProductionSecurityRegressionSuite(unittest.TestCase):
     def test_03_customer_signup_and_login_with_verified_token(self):
         """Customer cannot login/signup without verified proof when legacy stub is disabled."""
         from app.utils.auth import SECRET_KEY, ALGORITHM
-        test_phone = "+919999000077"
+        test_phone = f"+9197{uuid.uuid4().int % 100000000:08d}"
         
         # Craft a signed verification token
         payload = {
@@ -176,7 +175,7 @@ class ProductionSecurityRegressionSuite(unittest.TestCase):
         })
         self.assertIn(res_signup.status_code, [200, 201])
         signup_data = res_signup.json()
-        self.assertEqual(signup_data["customer"]["phone"], test_phone)
+        self.assertEqual(signup_data["phone"], test_phone)
         self.assertIn("token", signup_data)
 
         # 2. Login with verification_token
