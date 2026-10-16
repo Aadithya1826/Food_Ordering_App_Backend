@@ -857,10 +857,23 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 db.flush()
                 db.refresh(session_obj)
 
+        session_bill_no = None
+        if is_dine_in_req and session_obj:
+            existing_sibling_bill = db.query(Order.bill_no).filter(
+                Order.dine_in_session_id == session_obj.id,
+                Order.bill_no.isnot(None)
+            ).first()
+            if existing_sibling_bill and existing_sibling_bill[0]:
+                session_bill_no = existing_sibling_bill[0]
+            else:
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
+                session_bill_no = (max_bill_no or 0) + 1
+
         new_order = Order(
             restaurant_id=restaurant_id,
             table_id=table_id,
             dine_in_session_id=session_obj.id if session_obj else None,
+            bill_no=session_bill_no if is_dine_in_req else None,
             order_source="CUSTOMER_APP",
             total_amount=calculated_total,
             status=status,
@@ -881,6 +894,12 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         db.add(new_order)
         db.flush()
         db.refresh(new_order)
+
+        if session_bill_no and session_obj:
+            db.query(Order).filter(
+                Order.dine_in_session_id == session_obj.id,
+                Order.bill_no.is_(None)
+            ).update({Order.bill_no: session_bill_no}, synchronize_session=False)
 
         for item_id, qty, price in validated_items:
             order_item = OrderItem(
@@ -929,6 +948,8 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             "success": True,
             "orderId": f"ORD-{str(new_order.id).zfill(6)}",
             "dbOrderId": new_order.id,
+            "bill_no": new_order.bill_no,
+            "billNo": new_order.bill_no,
             "sessionId": session_obj.id if session_obj else None,
             "sessionUid": session_obj.session_uid if session_obj else None,
             "totalAmount": new_order.total_amount,
@@ -2416,34 +2437,130 @@ def get_customer_orders_by_phone(
 
     table_number_map = build_table_number_map(db, orders)
     result = []
+    grouped_dine_in = {}
+
     for order in orders:
+        ord_type = (getattr(order, "order_type", "DINE_IN") or "DINE_IN").upper()
+        is_dine_in = ord_type in ["DINE_IN", "DINE IN"]
+
+        group_key = None
+        if is_dine_in:
+            if not order.bill_no:
+                if order.dine_in_session_id:
+                    sibling_bill = db.query(Order.bill_no).filter(
+                        Order.dine_in_session_id == order.dine_in_session_id,
+                        Order.bill_no.isnot(None)
+                    ).first()
+                    if sibling_bill and sibling_bill[0]:
+                        order.bill_no = sibling_bill[0]
+                    else:
+                        max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
+                        order.bill_no = (max_bill_no or 0) + 1
+                else:
+                    max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
+                    order.bill_no = (max_bill_no or 0) + 1
+                db.commit()
+
+            if order.dine_in_session_id:
+                group_key = f"dinein_sess_{order.restaurant_id}_{order.dine_in_session_id}"
+            elif order.bill_no:
+                group_key = f"dinein_bill_{order.restaurant_id}_{order.bill_no}"
+
         items = []
         for oi in order.items:
+            oi_status = getattr(oi, "status", None) or ("CANCELLED" if (order.status or "").upper() == "CANCELLED" else "PENDING")
+            if (order.status or "").upper() != "CANCELLED" and oi_status == "CANCELLED":
+                continue
             items.append({
                 "id": oi.id,
+                "order_id": oi.order_id,
                 "menu_item_id": oi.menu_item_id,
                 "quantity": oi.quantity,
                 "price": oi.price,
                 "name": oi.menu_item.name if oi.menu_item else None,
                 "image_url": oi.menu_item.image_url if oi.menu_item else None,
             })
-        result.append({
-            "order": {
-                "id": order.id,
-                "orderId": f"ORD-{str(order.id).zfill(6)}",
-                "restaurant_id": order.restaurant_id,
-                "table_number": resolve_order_table_number(order, table_number_map),
-                "order_type": getattr(order, "order_type", "DINE_IN"),
-                "delivery_status": getattr(order, "delivery_status", None),
-                "delivery_address": json.loads(order.delivery_address_snapshot) if isinstance(getattr(order, "delivery_address_snapshot", None), str) else getattr(order, "delivery_address_snapshot", {}),
-                "status": order.status,
-                "payment_method": order.payment_method,
-                "payment_status": order.payment_status,
-                "total_amount": order.total_amount,
-                "created_at": order.created_at,
-            },
-            "items": items,
-        })
+
+        if group_key:
+            if group_key in grouped_dine_in:
+                existing = grouped_dine_in[group_key]
+                existing_items = existing["items"]
+
+                for it in items:
+                    match = next((x for x in existing_items if x.get("menu_item_id") == it.get("menu_item_id") and x.get("price") == it.get("price")), None)
+                    if match:
+                        match["quantity"] = float(match["quantity"] or 0) + float(it["quantity"] or 0)
+                    else:
+                        existing_items.append(it)
+
+                if not existing["order"].get("bill_no") and order.bill_no:
+                    existing["order"]["bill_no"] = order.bill_no
+                if not existing["order"].get("dine_in_session_id") and order.dine_in_session_id:
+                    existing["order"]["dine_in_session_id"] = order.dine_in_session_id
+
+                curr_status = (existing["order"].get("status") or "").upper()
+                new_status = (order.status or "").upper()
+                if new_status in ["PREPARING", "READY", "CONFIRMED", "PENDING"]:
+                    existing["order"]["status"] = order.status
+                elif curr_status not in ["PREPARING", "READY", "CONFIRMED", "PENDING"] and new_status == "SERVED":
+                    existing["order"]["status"] = "SERVED"
+
+                if (order.payment_status or "").upper() == "PAID":
+                    existing["order"]["payment_status"] = "Paid"
+                if order.payment_method and not existing["order"].get("payment_method"):
+                    existing["order"]["payment_method"] = order.payment_method
+
+                items_total = round(sum(float(x.get("price") or 0) * float(x.get("quantity") or 1) for x in existing_items), 2)
+                existing_total = float(existing["order"].get("total_amount") or 0)
+                new_ord_total = float(order.total_amount or 0)
+                existing["order"]["total_amount"] = round(max(existing_total, new_ord_total, items_total), 2)
+                continue
+            else:
+                entry = {
+                    "order": {
+                        "id": order.id,
+                        "orderId": f"ORD-{str(order.id).zfill(6)}",
+                        "restaurant_id": order.restaurant_id,
+                        "table_number": resolve_order_table_number(order, table_number_map),
+                        "order_type": getattr(order, "order_type", "DINE_IN"),
+                        "bill_no": order.bill_no,
+                        "dine_in_session_id": order.dine_in_session_id,
+                        "delivery_status": getattr(order, "delivery_status", None),
+                        "delivery_address": json.loads(order.delivery_address_snapshot) if isinstance(getattr(order, "delivery_address_snapshot", None), str) else getattr(order, "delivery_address_snapshot", {}),
+                        "status": order.status,
+                        "payment_method": order.payment_method,
+                        "payment_status": order.payment_status,
+                        "total_amount": order.total_amount,
+                        "created_at": order.created_at,
+                    },
+                    "items": items,
+                }
+                if order.dine_in_session_id:
+                    sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
+                    if sess and float(sess.total_amount or 0) > 0:
+                        entry["order"]["total_amount"] = float(sess.total_amount)
+                grouped_dine_in[group_key] = entry
+                result.append(entry)
+        else:
+            result.append({
+                "order": {
+                    "id": order.id,
+                    "orderId": f"ORD-{str(order.id).zfill(6)}",
+                    "restaurant_id": order.restaurant_id,
+                    "table_number": resolve_order_table_number(order, table_number_map),
+                    "order_type": getattr(order, "order_type", "DINE_IN"),
+                    "bill_no": order.bill_no,
+                    "dine_in_session_id": order.dine_in_session_id,
+                    "delivery_status": getattr(order, "delivery_status", None),
+                    "delivery_address": json.loads(order.delivery_address_snapshot) if isinstance(getattr(order, "delivery_address_snapshot", None), str) else getattr(order, "delivery_address_snapshot", {}),
+                    "status": order.status,
+                    "payment_method": order.payment_method,
+                    "payment_status": order.payment_status,
+                    "total_amount": order.total_amount,
+                    "created_at": order.created_at,
+                },
+                "items": items,
+            })
     return result
 
 
