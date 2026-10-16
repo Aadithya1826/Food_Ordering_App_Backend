@@ -58,7 +58,18 @@ def rider_register(payload: RiderRegisterPayload, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
 
     clean_digits = "".join([c for c in raw_phone if c.isdigit()])
-    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+    if len(clean_digits) == 12 and clean_digits.startswith("91"):
+        clean_phone = clean_digits[2:]
+    elif len(clean_digits) == 11 and clean_digits.startswith("0"):
+        clean_phone = clean_digits[1:]
+    else:
+        clean_phone = clean_digits
+
+    if len(clean_phone) != 10 or clean_phone[0] not in ("6", "7", "8", "9"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number."
+        )
 
     # Check if rider already exists
     existing = db.query(DeliveryPartner).filter(
@@ -127,7 +138,18 @@ def rider_register(payload: RiderRegisterPayload, db: Session = Depends(get_db))
 def set_rider_password(payload: SetPasswordPayload, db: Session = Depends(get_db)):
     raw_phone = payload.phone.strip()
     clean_digits = "".join([c for c in raw_phone if c.isdigit()])
-    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+    if len(clean_digits) == 12 and clean_digits.startswith("91"):
+        clean_phone = clean_digits[2:]
+    elif len(clean_digits) == 11 and clean_digits.startswith("0"):
+        clean_phone = clean_digits[1:]
+    else:
+        clean_phone = clean_digits
+
+    if len(clean_phone) != 10 or clean_phone[0] not in ("6", "7", "8", "9"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number. Must be a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9."
+        )
 
     rider = db.query(DeliveryPartner).filter(
         (DeliveryPartner.phone == raw_phone) |
@@ -162,7 +184,19 @@ def rider_login(payload: RiderLoginPayload, db: Session = Depends(get_db)):
 
     raw_phone = payload.phone.strip()
     clean_digits = "".join([c for c in raw_phone if c.isdigit()])
-    clean_phone = clean_digits[-10:] if len(clean_digits) >= 10 else clean_digits
+    if len(clean_digits) == 12 and clean_digits.startswith("91"):
+        clean_phone = clean_digits[2:]
+    elif len(clean_digits) == 11 and clean_digits.startswith("0"):
+        clean_phone = clean_digits[1:]
+    else:
+        clean_phone = clean_digits
+
+    # Strict Indian 10-digit phone number check
+    if len(clean_phone) != 10 or clean_phone[0] not in ("6", "7", "8", "9"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number. Must be a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9."
+        )
 
     rider = db.query(DeliveryPartner).filter(
         (DeliveryPartner.phone == raw_phone) |
