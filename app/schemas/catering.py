@@ -49,11 +49,12 @@ class CateringSwapOptionsListResponse(BaseModel):
 
 class CateringSessionCreate(BaseModel):
     customer_id: int
-    restaurant_id: Optional[int] = None
+    restaurant_id: int
     package_code: str
     guest_count: int
 
 class CateringSessionEventUpdate(BaseModel):
+    restaurant_id: Optional[int] = None
     event_name: Optional[str] = None
     event_date: Optional[str] = None # format YYYY-MM-DD
     serving_time: Optional[str] = None
@@ -105,6 +106,7 @@ from typing import Union
 
 class CateringQuoteResponse(BaseModel):
     session_id: Union[str, uuid.UUID] = Field(..., alias="id")
+    restaurant_id: Optional[int] = None
     status: str
     package_name: str
     package_price: float
@@ -176,6 +178,7 @@ class CateringPaymentResponse(BaseModel):
 class CateringOrderResponse(BaseModel):
     id: int
     catering_session_id: Optional[Union[str, uuid.UUID]] = None
+    restaurant_id: Optional[int] = None
     package_name: str
     event_name: Optional[str] = None
     event_date: Optional[datetime.datetime] = None
@@ -188,6 +191,7 @@ class CateringOrderResponse(BaseModel):
     payment_status: Optional[str] = None
     order_status: str
     payments: List[CateringPaymentResponse] = []
+    created_at: Optional[datetime.datetime] = None
 
     class Config:
         from_attributes = True

@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, or_, and_
 from datetime import datetime, timedelta
+import json
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..models.menu import MenuItem
 from ..models.restaurant import Restaurant
+from ..models.customer import Customer
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id
 
@@ -487,28 +489,19 @@ def get_item_wise_report(
 # 100% precision for all order origins.
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/api/v1/reports/mobile-app")
-def get_mobile_app_report(
-    date: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    restaurant_id: int | None = None,
-    user = Depends(get_current_user),
-    db: Session = Depends(get_db)
+def _build_sales_report(
+    db: Session,
+    user,
+    restaurant_id: int | None,
+    date: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    source_filter: str = "ALL"  # "MOBILE", "CASHIER", or "TOTAL" / "ALL"
 ):
-    """
-    Mobile App Sales Report.
-
-    Returns sales data only for orders placed through the customer mobile app,
-    identified by: user_id IS NULL AND customer_phone IS NOT NULL.
-
-    Supports the same date filtering, IST timezone adjustment, restaurant
-    isolation, and paid-order definition as the existing hourly/item reports.
-    """
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
-    # ── Date range resolution (same logic as hourly/item reports) ─────────
+    # ── Date range resolution (IST timezone adjustment) ──────────────────────
     if start_date and end_date:
         try:
             start_target = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -525,75 +518,121 @@ def get_mobile_app_report(
             end_of_day = start_of_day + timedelta(days=1)
             display_date = target_date.strftime("%d/%m/%Y")
     else:
-        if date:
+        if date and date.lower() == "all":
+            start_of_day = datetime(2020, 1, 1)
+            end_of_day = datetime.utcnow() + timedelta(days=2)
+            display_date = "All Dates"
+        elif date:
             try:
                 target_date = datetime.strptime(date, "%Y-%m-%d").date()
             except ValueError:
                 target_date = datetime.utcnow().date()
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
         else:
             target_date = datetime.utcnow().date()
-        start_of_day = datetime(target_date.year, target_date.month, target_date.day)
-        end_of_day = start_of_day + timedelta(days=1)
-        display_date = target_date.strftime("%d/%m/%Y")
+            start_of_day = datetime(target_date.year, target_date.month, target_date.day)
+            end_of_day = start_of_day + timedelta(days=1)
+            display_date = target_date.strftime("%d/%m/%Y")
 
-    # Adjust for IST (UTC+5:30) — identical to existing reports
+    # Adjust for IST (UTC+5:30)
     utc_start = start_of_day - timedelta(hours=5, minutes=30)
     utc_end = end_of_day - timedelta(hours=5, minutes=30)
 
-    # ── Paid condition (identical to existing reports) ─────────────────────
-    paid_condition = and_(
-        Order.status != "CANCELLED",
+    # ── Source filtering ─────────────────────────────────────────────────────
+    cashier_cond = or_(
+        Order.order_source == "CASHIER_POS",
+        Order.user_id.isnot(None)
+    )
+    mobile_cond = and_(
+        Order.user_id.is_(None),
         or_(
-            func.lower(Order.payment_status) == "paid",
-            Order.status.in_(["SERVED", "COMPLETED", "DELIVERED"])
+            Order.order_source == "CUSTOMER_APP",
+            Order.order_source.is_(None)
         )
     )
 
-    # ── Mobile app order condition ──────────────────────────────────────────
-    # user_id IS NULL      → not created by a staff user (excludes POS)
-    # customer_phone IS NOT NULL → customer provided phone (excludes MCP/voice)
-    mobile_condition = and_(
-        Order.user_id.is_(None),
-        Order.customer_phone.isnot(None),
-        Order.customer_phone != ""
-    )
-
-    # ── Base query ──────────────────────────────────────────────────────────
     q = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(
         Order.created_at >= utc_start,
-        Order.created_at < utc_end,
-        paid_condition,
-        mobile_condition
+        Order.created_at < utc_end
     )
-    if restaurant_id:
-        q = q.filter(Order.restaurant_id == restaurant_id)
 
-    orders = q.order_by(Order.created_at.asc()).all()
+    if source_filter == "MOBILE":
+        q = q.filter(mobile_cond)
+    elif source_filter == "CASHIER":
+        q = q.filter(cashier_cond)
+
+    if restaurant_id:
+        q_hotel = q.filter(Order.restaurant_id == restaurant_id)
+        if q_hotel.count() > 0:
+            q = q_hotel
+
+    all_orders = q.order_by(Order.created_at.asc()).all()
+
+    # ── Filter fulfilled/paid orders for sales aggregation ──────────────────
+    paid_orders = [
+        o for o in all_orders
+        if o.status != "CANCELLED" and (
+            (o.payment_status or "").lower() == "paid" or
+            o.status in ["SERVED", "COMPLETED", "DELIVERED"]
+        )
+    ]
+
+    # ── Batch resolve customer names ────────────────────────────────────────
+    customer_phones = {o.customer_phone.strip() for o in all_orders if o.customer_phone and o.customer_phone.strip()}
+    customer_map = {}
+    if customer_phones:
+        phone_variants = set(customer_phones)
+        for p in customer_phones:
+            digits = "".join(filter(str.isdigit, p))
+            if len(digits) >= 10:
+                phone_variants.add(digits[-10:])
+                phone_variants.add(f"+91{digits[-10:]}")
+                phone_variants.add(f"+91 {digits[-10:]}")
+
+        cust_records = db.query(Customer).filter(Customer.phone.in_(phone_variants)).all()
+        for c in cust_records:
+            if c.phone and c.name:
+                customer_map[c.phone.strip()] = c.name
+                digits = "".join(filter(str.isdigit, c.phone))
+                if len(digits) >= 10:
+                    customer_map[digits[-10:]] = c.name
 
     # ── Aggregation ─────────────────────────────────────────────────────────
     total_sales = 0.0
-    total_orders = len(orders)
+    cashier_sales = 0.0
+    mobile_sales = 0.0
+    cashier_orders_count = 0
+    mobile_orders_count = 0
+
+    total_orders = len(paid_orders)
     item_aggregates = {}
     hourly_buckets = {h: 0.0 for h in range(24)}
-    
-    # Order type breakdown with both counts and sales amounts
+
     order_type_breakdown = {
         "DINE_IN": {"count": 0, "sales": 0.0},
         "TAKEAWAY": {"count": 0, "sales": 0.0},
         "DELIVERY": {"count": 0, "sales": 0.0},
     }
 
-    for o in orders:
-        amount = o.total_amount or 0.0
+    for o in paid_orders:
+        amount = float(o.total_amount or 0.0)
         total_sales += amount
 
-        # Hourly bucketing using IST (same offset as existing reports)
+        is_cashier_order = (getattr(o, "order_source", None) == "CASHIER_POS" or o.user_id is not None)
+        if is_cashier_order:
+            cashier_sales += amount
+            cashier_orders_count += 1
+        else:
+            mobile_sales += amount
+            mobile_orders_count += 1
+
         local_time = o.created_at + timedelta(hours=5, minutes=30)
         hourly_buckets[local_time.hour] += amount
 
-        # Order type breakdown
         raw_type = (o.order_type or "").upper().replace(" ", "_").replace("-", "_")
         if "DELIV" in raw_type or o.delivery_address_id is not None or (hasattr(o, 'delivery_address_snapshot') and o.delivery_address_snapshot is not None):
             otype = "DELIVERY"
@@ -607,19 +646,92 @@ def get_mobile_app_report(
         order_type_breakdown[otype]["count"] += 1
         order_type_breakdown[otype]["sales"] += amount
 
-        # Item aggregation
         for item in o.items:
             if not item.menu_item:
                 continue
             name = item.menu_item.name
-            rate = item.price or item.menu_item.price
+            rate = float(item.price or item.menu_item.price or 0.0)
             key = (name, rate)
             if key not in item_aggregates:
                 item_aggregates[key] = {"qty": 0, "amount": 0.0}
             item_aggregates[key]["qty"] += item.quantity
             item_aggregates[key]["amount"] += item.quantity * rate
 
-    # ── Items list ──────────────────────────────────────────────────────────
+    # ── Build detailed orders history list ──────────────────────────────────
+    orders_list = []
+    for o in all_orders:
+        amount = float(o.total_amount or 0.0)
+        local_time = o.created_at + timedelta(hours=5, minutes=30)
+
+        is_cashier_order = (getattr(o, "order_source", None) == "CASHIER_POS" or o.user_id is not None)
+        source_key = "CASHIER" if is_cashier_order else "MOBILE"
+        source_badge = "(C)" if is_cashier_order else "(M)"
+        source_label = "(C) Cashier" if is_cashier_order else "(M) Mobile"
+
+        raw_type = (o.order_type or "").upper().replace(" ", "_").replace("-", "_")
+        if "DELIV" in raw_type or o.delivery_address_id is not None or (hasattr(o, 'delivery_address_snapshot') and o.delivery_address_snapshot is not None):
+            otype = "DELIVERY"
+        elif "TAKE" in raw_type or o.table_id is None or str(o.table_id).lower() == "takeaway":
+            otype = "TAKEAWAY"
+        else:
+            otype = "DINE_IN"
+
+        raw_phone = (o.customer_phone or "").strip()
+        digits = "".join(filter(str.isdigit, raw_phone))
+        cust_name = customer_map.get(raw_phone)
+        if not cust_name and len(digits) >= 10:
+            cust_name = customer_map.get(digits[-10:])
+        if not cust_name and o.delivery_address_snapshot:
+            try:
+                snap = json.loads(o.delivery_address_snapshot) if isinstance(o.delivery_address_snapshot, str) else o.delivery_address_snapshot
+                if isinstance(snap, dict) and snap.get("contact_name"):
+                    cust_name = snap["contact_name"]
+            except Exception:
+                pass
+        if not cust_name:
+            cust_name = "Walk-in Guest" if is_cashier_order else "Guest"
+
+        order_items = []
+        summary_items = []
+        for it in o.items:
+            iname = it.menu_item.name if it.menu_item else "Item"
+            iqty = it.quantity or 1
+            iprice = float(it.price or (it.menu_item.price if it.menu_item else 0.0))
+            order_items.append({
+                "name": iname,
+                "quantity": iqty,
+                "rate": iprice,
+                "amount": round(iqty * iprice, 2)
+            })
+            summary_items.append(f"{iname} x{iqty}")
+
+        orders_list.append({
+            "id": o.id,
+            "order_id": f"ORD-{str(o.id).zfill(6)}",
+            "bill_no": o.bill_no,
+            "branch_order_id": getattr(o, "branch_order_id", None),
+            "table_number": getattr(o, "table_id", None),
+            "source": source_key,
+            "source_badge": source_badge,
+            "source_label": source_label,
+            "customer_name": cust_name,
+            "customer_phone": raw_phone,
+            "order_type": otype,
+            "status": o.status or "CONFIRMED",
+            "payment_status": o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED", "DELIVERED"] else "Pending"),
+            "payment_method": o.payment_method or ("Cash" if is_cashier_order else "UPI"),
+            "total_amount": round(amount, 2),
+            "date": local_time.strftime("%d/%m/%Y"),
+            "time": local_time.strftime("%I:%M:%S %p"),
+            "date_time": local_time.strftime("%d/%m/%Y, %I:%M %p"),
+            "created_at": local_time.isoformat(),
+            "items_count": sum(it["quantity"] for it in order_items),
+            "items_summary": ", ".join(summary_items) if summary_items else "No items",
+            "items": order_items
+        })
+
+    orders_list_sorted = sorted(orders_list, key=lambda x: x["id"], reverse=True)
+
     items_list = []
     for (name, rate), data in item_aggregates.items():
         items_list.append({
@@ -630,7 +742,6 @@ def get_mobile_app_report(
         })
     items_list.sort(key=lambda x: x["amount"], reverse=True)
 
-    # ── Hourly timeline (same label format as existing hourly report) ────────
     timeline = []
     for h in sorted(hourly_buckets.keys()):
         start_ampm = "AM" if h < 12 else "PM"
@@ -645,26 +756,31 @@ def get_mobile_app_report(
         time_label = f"{start_h} {start_ampm} To {end_h} {end_ampm}"
         timeline.append({"time": time_label, "sales": hourly_buckets[h]})
 
-    # ── First / last order summary ──────────────────────────────────────────
     starting_order = None
     ending_order = None
-    if orders:
-        first = orders[0]
-        last = orders[-1]
+    target_boundary_orders = paid_orders if paid_orders else all_orders
+    if target_boundary_orders:
+        first = target_boundary_orders[0]
+        last = target_boundary_orders[-1]
         first_local = first.created_at + timedelta(hours=5, minutes=30)
         last_local = last.created_at + timedelta(hours=5, minutes=30)
+        first_is_c = (getattr(first, "order_source", None) == "CASHIER_POS" or first.user_id is not None)
+        last_is_c = (getattr(last, "order_source", None) == "CASHIER_POS" or last.user_id is not None)
         starting_order = {
             "id": f"ORD-{str(first.id).zfill(6)}",
             "time": first_local.strftime("%I:%M:%S %p"),
-            "phone": first.customer_phone
+            "phone": first.customer_phone,
+            "source": "CASHIER" if first_is_c else "MOBILE",
+            "source_badge": "(C)" if first_is_c else "(M)"
         }
         ending_order = {
             "id": f"ORD-{str(last.id).zfill(6)}",
             "time": last_local.strftime("%I:%M:%S %p"),
-            "phone": last.customer_phone
+            "phone": last.customer_phone,
+            "source": "CASHIER" if last_is_c else "MOBILE",
+            "source_badge": "(C)" if last_is_c else "(M)"
         }
 
-    # ── Restaurant info ──────────────────────────────────────────────────────
     restaurant = None
     if restaurant_id:
         restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
@@ -673,19 +789,20 @@ def get_mobile_app_report(
 
     return {
         "date": display_date,
-        "total_sales": total_sales,
+        "report_type": source_filter,
+        "total_sales": round(total_sales, 2),
+        "cashier_sales": round(cashier_sales, 2),
+        "mobile_sales": round(mobile_sales, 2),
         "total_orders": total_orders,
+        "cashier_orders_count": cashier_orders_count,
+        "mobile_orders_count": mobile_orders_count,
         "starting_order": starting_order,
         "ending_order": ending_order,
         "items": items_list,
         "timeline": timeline,
         "order_type_breakdown": order_type_breakdown,
         "order_type_counts": order_type_counts,
-        "identification_note": (
-            "Mobile app orders identified by: user_id IS NULL AND customer_phone IS NOT NULL. "
-            "Excludes POS (user_id set) and MCP/voice orders (no customer_phone). "
-            "Includes fulfilled Takeaway, Delivery, and Dine-In orders."
-        ),
+        "orders": orders_list_sorted,
         "restaurant": {
             "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
             "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
@@ -693,3 +810,51 @@ def get_mobile_app_report(
             "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
         }
     }
+
+
+@router.get("/api/v1/reports/mobile-app")
+def get_mobile_app_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mobile App Sales Report alone.
+    Returns sales data ONLY for orders placed through the customer mobile app.
+    """
+    return _build_sales_report(db, user, restaurant_id, date, start_date, end_date, source_filter="MOBILE")
+
+
+@router.get("/api/v1/reports/cashier")
+def get_cashier_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Cashier Sales Report alone.
+    Returns sales data ONLY for orders placed through the cashier POS.
+    """
+    return _build_sales_report(db, user, restaurant_id, date, start_date, end_date, source_filter="CASHIER")
+
+
+@router.get("/api/v1/reports/total-sales")
+def get_total_sales_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Total Consolidated Sales Report.
+    Returns all sales income (Cashier + Mobile App) with (C) and (M) source labels.
+    """
+    return _build_sales_report(db, user, restaurant_id, date, start_date, end_date, source_filter="TOTAL")
