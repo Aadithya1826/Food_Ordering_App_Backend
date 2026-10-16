@@ -232,7 +232,7 @@ def get_customer_favorites(
 ):
     """Fetch all favorited menu items for a customer."""
     from ..models.customer import CustomerFavorite
-    from ..models.restaurant import MenuItem
+    from ..models.menu import MenuItem
     if customer_id != current_customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to access these favorites")
         
@@ -262,7 +262,7 @@ def add_customer_favorite(
 ):
     """Add a menu item to customer favorites."""
     from ..models.customer import CustomerFavorite
-    from ..models.restaurant import MenuItem
+    from ..models.menu import MenuItem
     if customer_id != current_customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to add favorites for this customer")
         
