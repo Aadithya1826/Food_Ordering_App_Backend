@@ -12,6 +12,31 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Customer Delivery"])
 
+DELIVERY_RADIUS_KM = 5.0
+
+
+def _assert_within_delivery_coverage(db: Session, latitude, longitude):
+    """Reject addresses that are farther than DELIVERY_RADIUS_KM from every restaurant."""
+    from ..models.restaurant import Restaurant
+    from ..services.dispatch import haversine
+
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=400, detail="Please pin your delivery location on the map.")
+
+    restaurants = db.query(Restaurant).filter(
+        Restaurant.latitude.isnot(None),
+        Restaurant.longitude.isnot(None),
+    ).all()
+    nearest = min(
+        (haversine(latitude, longitude, float(r.latitude), float(r.longitude)) for r in restaurants),
+        default=float("inf"),
+    )
+    if nearest > DELIVERY_RADIUS_KM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Data Udipi delivers only within {int(DELIVERY_RADIUS_KM)} km. This location is outside our delivery range.",
+        )
+
 
 class AddressCreatePayload(BaseModel):
     address_type: str = "Home"
@@ -71,6 +96,8 @@ def create_customer_address(
     if customer_id != current_customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to create address for this customer")
     customer = current_customer
+
+    _assert_within_delivery_coverage(db, payload.latitude, payload.longitude)
 
     # If database has a customer_profiles table referenced by foreign key, ensure entry exists
     try:
