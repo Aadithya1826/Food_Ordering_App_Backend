@@ -306,6 +306,7 @@ class PosOrderPayload(BaseModel):
     total_amount: float = 0
     bill_no: Optional[int] = None
     timestamp: Optional[str] = None
+    customer_phone: Optional[str] = None
 
 from ..models.table import Table
 
@@ -377,7 +378,8 @@ def create_pos_order(
             payment_method=payload.payment_method,
             order_type=pos_order_type,
             bill_no=payload.bill_no,
-            branch_order_id=next_branch_order_id
+            branch_order_id=next_branch_order_id,
+            customer_phone=payload.customer_phone
         )
         
         if payload.timestamp:
