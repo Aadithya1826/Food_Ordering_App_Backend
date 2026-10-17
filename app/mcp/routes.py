@@ -2,8 +2,13 @@ import asyncio
 import re
 import base64
 import io
+import os
+import time
+from collections import OrderedDict
 # pyrefly: ignore [missing-import]
 import edge_tts
+# pyrefly: ignore [missing-import]
+from gtts import gTTS
 # pyrefly: ignore [missing-import]
 import json
 # pyrefly: ignore [missing-import]
@@ -25,15 +30,159 @@ from .schemas import (
     MCPTtsRequest,
     MCPVoiceResponse,
     CustomerMCPRequest,
+    FOLLOWUP_RESPONSE_SCHEMA,
 )
 from .tools import build_tool_prompt, execute_tool, list_tool_definitions
 
 router = APIRouter()
 client = GeminiClient()
 
+# Sentence terminators, including the Devanagari/Bengali danda. Splitting only
+# on [.?!] meant Hindi/Tamil replies never hit a boundary and were therefore
+# synthesised as one late block instead of streaming incrementally.
+_SENTENCE_BOUNDARY = re.compile(r'([.?!।॥]+(?:\s|\n|$)+)')
+# Don't fire TTS for fragments shorter than this; a 2-word clip sounds clipped
+# and costs a wasted synthesis round-trip.
+_MIN_TTS_CHARS = 12
 
-async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
-    if not text: return None
+# --------------------------------------------------------------------------- #
+# Edge-TTS circuit breaker
+#
+# In some deployments (AWS/ECS egress, datacentre IP ranges) Microsoft's
+# consumer speech endpoint answers 403 on *every* connection. The old code
+# still tried Edge-TTS - twice, primary voice then English - on every single
+# turn before finally falling back to gTTS. Each failed attempt pays a full
+# websocket handshake + timeout, so the customer heard nothing for several
+# seconds after the text had already rendered.
+#
+# Once Edge-TTS has failed repeatedly we trip the breaker and route straight to
+# gTTS for a cooldown window, then probe again. This removes the dead round
+# trips that dominate perceived voice latency.
+# --------------------------------------------------------------------------- #
+_EDGE_TTS_TIMEOUT = float(os.getenv("EDGE_TTS_TIMEOUT", "6"))
+_EDGE_TTS_FAILURE_THRESHOLD = int(os.getenv("EDGE_TTS_FAILURE_THRESHOLD", "2"))
+_EDGE_TTS_COOLDOWN = float(os.getenv("EDGE_TTS_COOLDOWN", "300"))
+# Set EDGE_TTS_ENABLED=false to skip Edge-TTS entirely (recommended when you
+# already know the host cannot reach the Microsoft endpoint).
+_EDGE_TTS_ENABLED = os.getenv("EDGE_TTS_ENABLED", "true").strip().lower() not in (
+    "false",
+    "0",
+    "no",
+)
+
+_edge_tts_failures = 0
+_edge_tts_disabled_until = 0.0
+
+_DEFAULT_VOICE = "en-IN-PrabhatNeural"
+
+# Short canned confirmations ("Okay, got it.", "Here is your cart.") are spoken
+# on a large share of turns. Synthesising them from scratch every time adds a
+# needless network round-trip to the critical path, so memoise them.
+_TTS_CACHE: "OrderedDict[tuple[str, str], str]" = OrderedDict()
+_TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_SIZE", "256"))
+# Only cache short phrases; long bespoke answers would just evict the useful
+# entries without ever being reused.
+_TTS_CACHE_MAX_CHARS = 160
+
+
+def _tts_cache_get(key: "tuple[str, str]") -> str | None:
+    audio = _TTS_CACHE.get(key)
+    if audio is not None:
+        _TTS_CACHE.move_to_end(key)
+    return audio
+
+
+def _tts_cache_put(key: "tuple[str, str]", audio: str) -> None:
+    _TTS_CACHE[key] = audio
+    _TTS_CACHE.move_to_end(key)
+    while len(_TTS_CACHE) > _TTS_CACHE_MAX:
+        _TTS_CACHE.popitem(last=False)
+
+
+def _edge_tts_available() -> bool:
+    """True when Edge-TTS is worth attempting right now."""
+    if not _EDGE_TTS_ENABLED:
+        return False
+    return time.monotonic() >= _edge_tts_disabled_until
+
+
+def _record_edge_tts_failure() -> None:
+    global _edge_tts_failures, _edge_tts_disabled_until
+    _edge_tts_failures += 1
+    if _edge_tts_failures >= _EDGE_TTS_FAILURE_THRESHOLD:
+        _edge_tts_disabled_until = time.monotonic() + _EDGE_TTS_COOLDOWN
+        _edge_tts_failures = 0
+        print(
+            f"[Edge-TTS] Repeated failures; skipping Edge-TTS for "
+            f"{int(_EDGE_TTS_COOLDOWN)}s and using gTTS directly."
+        )
+
+
+def _record_edge_tts_success() -> None:
+    global _edge_tts_failures
+    _edge_tts_failures = 0
+
+
+async def _edge_tts_synthesize(text: str, voice: str) -> str | None:
+    """One Edge-TTS attempt, hard-bounded by a timeout."""
+
+    async def _stream() -> bytes:
+        communicate = edge_tts.Communicate(text, voice, rate="+10%", pitch="+0Hz")
+        audio_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data += chunk["data"]
+        return audio_data
+
+    audio_data = await asyncio.wait_for(_stream(), timeout=_EDGE_TTS_TIMEOUT)
+    if not audio_data:
+        return None
+    return base64.b64encode(audio_data).decode("utf-8")
+
+
+def _gtts_lang_for(text: str, lang_hint: str | None, voice: str) -> str:
+    """Map detected script / voice onto a gTTS language code."""
+    prefix_map = {
+        "ta": "ta", "ml": "ml", "kn": "kn", "te": "te",
+        "hi": "hi", "ur": "ur", "bn": "bn", "gu": "gu", "pa": "pa",
+    }
+    voice_prefix = (voice or "").split("-")[0]
+    if voice_prefix in prefix_map:
+        return prefix_map[voice_prefix]
+
+    hint = (lang_hint or "").lower()
+    for name, code in (
+        ("tamil", "ta"), ("malayalam", "ml"), ("kannada", "kn"),
+        ("telugu", "te"), ("hindi", "hi"), ("urdu", "ur"),
+        ("bengali", "bn"), ("gujarati", "gu"), ("punjabi", "pa"),
+    ):
+        if name in hint:
+            return code
+    return "en"
+
+
+async def _gtts_synthesize(text: str, lang: str) -> str | None:
+    def run_gtts(text_to_speak: str, language: str) -> str:
+        tts = gTTS(text=text_to_speak, lang=language)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return base64.b64encode(fp.read()).decode("utf-8")
+
+    try:
+        # Blocking network+IO call, so keep it off the event loop.
+        return await asyncio.to_thread(run_gtts, text, lang)
+    except Exception as exc:
+        print(f"[TTS] gTTS failed (lang={lang}): {exc}")
+        if lang != "en":
+            try:
+                return await asyncio.to_thread(run_gtts, text, "en")
+            except Exception as exc_en:
+                print(f"[TTS] gTTS English fallback failed: {exc_en}")
+        return None
+
+
+def _select_voice(text: str, lang_hint: str | None) -> str:
     has_tamil     = bool(re.search(r'[\u0B80-\u0BFF]', text))
     has_devanag   = bool(re.search(r'[\u0900-\u097F]', text))
     has_malayalam = bool(re.search(r'[\u0D00-\u0D7F]', text))
@@ -44,78 +193,67 @@ async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
     has_gujarati  = bool(re.search(r'[\u0A80-\u0AFF]', text))
     has_gurmukhi  = bool(re.search(r'[\u0A00-\u0A7F]', text))
 
-    if has_tamil:       voice = 'ta-IN-ValluvarNeural'
-    elif has_malayalam: voice = 'ml-IN-MidhunNeural'
-    elif has_kannada:   voice = 'kn-IN-GaganNeural'
-    elif has_telugu:    voice = 'te-IN-MohanNeural'
-    elif has_urdu:      voice = 'ur-IN-SalmanNeural'
-    elif has_bengali:   voice = 'bn-IN-BashkarNeural'
-    elif has_gujarati:  voice = 'gu-IN-NiranjanNeural'
-    elif has_gurmukhi:  voice = 'pa-IN-OjasNeural'
-    elif has_devanag:   voice = 'hi-IN-MadhurNeural'
-    else:
-        hint = (lang_hint or '').lower()
-        if 'tamil' in hint or 'tanglish' in hint: voice = 'ta-IN-ValluvarNeural'
-        elif 'malayalam' in hint: voice = 'ml-IN-MidhunNeural'
-        elif 'kannada' in hint: voice = 'kn-IN-GaganNeural'
-        elif 'telugu' in hint: voice = 'te-IN-MohanNeural'
-        elif 'hindi' in hint or 'hinglish' in hint or 'marathi' in hint: voice = 'hi-IN-MadhurNeural'
-        elif 'urdu' in hint: voice = 'ur-IN-SalmanNeural'
-        elif 'bengali' in hint: voice = 'bn-IN-BashkarNeural'
-        elif 'gujarati' in hint: voice = 'gu-IN-NiranjanNeural'
-        elif 'punjabi' in hint: voice = 'pa-IN-OjasNeural'
-        else: voice = 'en-IN-PrabhatNeural'
+    if has_tamil:       return 'ta-IN-ValluvarNeural'
+    if has_malayalam:   return 'ml-IN-MidhunNeural'
+    if has_kannada:     return 'kn-IN-GaganNeural'
+    if has_telugu:      return 'te-IN-MohanNeural'
+    if has_urdu:        return 'ur-IN-SalmanNeural'
+    if has_bengali:     return 'bn-IN-BashkarNeural'
+    if has_gujarati:    return 'gu-IN-NiranjanNeural'
+    if has_gurmukhi:    return 'pa-IN-OjasNeural'
+    if has_devanag:     return 'hi-IN-MadhurNeural'
 
-    try:
-        # +10% rate makes the TTS sound much more like a brisk, natural human conversation 
-        # instead of a slow, robotic news-reader.
-        communicate = edge_tts.Communicate(text, voice, rate="+10%", pitch="+0Hz")
-        audio_data = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_data += chunk["data"]
-        return base64.b64encode(audio_data).decode('utf-8')
-    except Exception as e:
-        print(f"[Edge-TTS] Error generating audio (voice={voice}): {e}")
-        if voice != 'en-IN-PrabhatNeural':
-            try:
-                communicate = edge_tts.Communicate(text, 'en-IN-PrabhatNeural', rate="+10%", pitch="+0Hz")
-                audio_data = b""
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        audio_data += chunk["data"]
-                return base64.b64encode(audio_data).decode('utf-8')
-            except Exception as e2:
-                print(f"[Edge-TTS Fallback] Error generating audio (voice=en-IN-PrabhatNeural): {e2}")
-        
-        # Final Fallback to Google Translate TTS if Edge-TTS completely fails in the deployed environment
+    hint = (lang_hint or '').lower()
+    if 'tamil' in hint or 'tanglish' in hint: return 'ta-IN-ValluvarNeural'
+    if 'malayalam' in hint: return 'ml-IN-MidhunNeural'
+    if 'kannada' in hint: return 'kn-IN-GaganNeural'
+    if 'telugu' in hint: return 'te-IN-MohanNeural'
+    if 'hindi' in hint or 'hinglish' in hint or 'marathi' in hint: return 'hi-IN-MadhurNeural'
+    if 'urdu' in hint: return 'ur-IN-SalmanNeural'
+    if 'bengali' in hint: return 'bn-IN-BashkarNeural'
+    if 'gujarati' in hint: return 'gu-IN-NiranjanNeural'
+    if 'punjabi' in hint: return 'pa-IN-OjasNeural'
+    return _DEFAULT_VOICE
+
+
+async def _generate_tts_audio(text: str, lang_hint: str = None) -> str | None:
+    if not text:
+        return None
+
+    voice = _select_voice(text, lang_hint)
+
+    cache_key = (text, voice)
+    cacheable = len(text) <= _TTS_CACHE_MAX_CHARS
+    if cacheable:
+        cached = _tts_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+    audio = None
+
+    if _edge_tts_available():
         try:
-            print("[TTS] Falling back to gTTS...")
-            import asyncio
+            audio = await _edge_tts_synthesize(text, voice)
+            if audio:
+                _record_edge_tts_success()
+            else:
+                _record_edge_tts_failure()
+        except asyncio.TimeoutError:
+            print(f"[Edge-TTS] Timed out after {_EDGE_TTS_TIMEOUT}s (voice={voice})")
+            _record_edge_tts_failure()
+        except Exception as e:
+            print(f"[Edge-TTS] Error generating audio (voice={voice}): {e}")
+            _record_edge_tts_failure()
 
-            # pyrefly: ignore [missing-import]
-            from gtts import gTTS
-            import io
-            
-            def run_gtts(text_to_speak, lang):
-                tts = gTTS(text=text_to_speak, lang=lang)
-                fp = io.BytesIO()
-                tts.write_to_fp(fp)
-                fp.seek(0)
-                return base64.b64encode(fp.read()).decode('utf-8')
-            
-            fallback_lang = "en"
-            if lang_hint:
-                if "ta" in lang_hint: fallback_lang = "ta"
-                elif "hi" in lang_hint: fallback_lang = "hi"
-                elif "ml" in lang_hint: fallback_lang = "ml"
-                elif "te" in lang_hint: fallback_lang = "te"
-            
-            # Run the blocking gTTS call in a background thread to prevent pausing the event loop
-            return await asyncio.to_thread(run_gtts, text, fallback_lang)
-        except Exception as gtts_e:
-            print(f"[TTS Fallback] gTTS also failed: {gtts_e}")
-            return None
+    if not audio:
+        # gTTS is the reliable path. We go straight here while the breaker is
+        # open, which is what removes the multi-second stall before audio starts.
+        audio = await _gtts_synthesize(text, _gtts_lang_for(text, lang_hint, voice))
+
+    if audio and cacheable:
+        _tts_cache_put(cache_key, audio)
+
+    return audio
 @router.get("/api/v1/mcp/tools", response_model=list[dict])
 def list_tools():
     return list_tool_definitions()
@@ -159,11 +297,19 @@ async def natural_language_query(
     )
 
     try:
-        parsed = await client.generate_json(full_prompt, audio_base64=request.audio_base64)
+        parsed = await client.generate_json(
+            full_prompt,
+            audio_base64=request.audio_base64,
+            audio_mime_type=request.audio_mime_type,
+        )
     except Exception as e:
         print(f"Error parsing JSON from Gemini: {e}")
         try:
-            raw_text = await client.generate_text(full_prompt, audio_base64=request.audio_base64)
+            raw_text = await client.generate_text(
+                full_prompt,
+                audio_base64=request.audio_base64,
+                audio_mime_type=request.audio_mime_type,
+            )
             parsed = client._try_parse_json(raw_text)
             if not parsed:
                 return MCPResponse(assistant_text=raw_text, tool_name=None, tool_result=None)
@@ -216,7 +362,10 @@ async def natural_language_query(
                     "Respond with valid JSON containing ONLY the key: 'assistant_text'."
                 )
                 try:
-                    second_parsed = await client.generate_json(followup_prompt)
+                    second_parsed = await client.generate_json(
+                        followup_prompt,
+                        response_schema=FOLLOWUP_RESPONSE_SCHEMA,
+                    )
                     if "assistant_text" in second_parsed:
                         final_assistant_text = second_parsed["assistant_text"]
                 except Exception as e:
@@ -276,44 +425,50 @@ async def voice_assistant_query(
             "Respond with valid JSON only."
         )
 
-        async def process_stream_and_tts(stream_gen, result_container):
+        async def process_stream_and_tts(stream_gen, result_container, lang_hint=None):
             raw_text = ""
             current_live_text = ""
             last_processed_idx = 0
-            import re
-            
+
             async for chunk in stream_gen:
                 raw_text += chunk
                 yield f"data: {json.dumps({'type': 'llm_chunk', 'chunk': chunk})}\n\n"
-                
+
                 current_live_text += chunk
                 match = re.search(r'"assistant_text"\s*:\s*"((?:[^"\\]|\\.)*)', current_live_text)
                 if match:
                     text_so_far = match.group(1).replace('\\"', '"').replace('\\n', '\n')
                     unprocessed = text_so_far[last_processed_idx:]
-                    boundary_match = re.search(r'([.?!]+(?:\s|\n|$)+)', unprocessed)
+                    boundary_match = _SENTENCE_BOUNDARY.search(unprocessed)
                     if boundary_match:
                         boundary_idx = boundary_match.end()
                         sentence = unprocessed[:boundary_idx].strip()
-                        last_processed_idx += boundary_idx
-                        if sentence:
-                            audio_chunk = await _generate_tts_audio(sentence)
+                        # Skip micro-fragments; they sound clipped and waste a
+                        # synthesis round-trip. They get flushed with the next
+                        # sentence instead.
+                        if sentence and len(sentence) >= _MIN_TTS_CHARS:
+                            last_processed_idx += boundary_idx
+                            audio_chunk = await _generate_tts_audio(sentence, lang_hint)
                             yield f"data: {json.dumps({'type': 'audio', 'payload': audio_chunk, 'fallbackText': sentence})}\n\n"
-            
+
             # Flush remaining unprocessed text at the end of the stream
             match = re.search(r'"assistant_text"\s*:\s*"((?:[^"\\]|\\.)*)', current_live_text)
             if match:
                 text_so_far = match.group(1).replace('\\"', '"').replace('\\n', '\n')
                 unprocessed = text_so_far[last_processed_idx:].strip()
                 if unprocessed:
-                    audio_chunk = await _generate_tts_audio(unprocessed)
+                    audio_chunk = await _generate_tts_audio(unprocessed, lang_hint)
                     yield f"data: {json.dumps({'type': 'audio', 'payload': audio_chunk, 'fallbackText': unprocessed})}\n\n"
-                        
+
             result_container.append(raw_text)
 
         raw_json_container = []
         try:
-            stream = client.generate_json_stream(full_prompt, audio_base64=request.audio_base64)
+            stream = client.generate_json_stream(
+                full_prompt,
+                audio_base64=request.audio_base64,
+                audio_mime_type=request.audio_mime_type,
+            )
             async for item in process_stream_and_tts(stream, raw_json_container):
                 yield item
         except Exception as e:
@@ -363,10 +518,13 @@ async def voice_assistant_query(
                     second_raw_container = []
                     yield f"data: {json.dumps({'type': 'second_pass_start'})}\n\n"
                     try:
-                        stream2 = client.generate_json_stream(followup_prompt)
+                        stream2 = client.generate_json_stream(
+                            followup_prompt,
+                            response_schema=FOLLOWUP_RESPONSE_SCHEMA,
+                        )
                         async for item in process_stream_and_tts(stream2, second_raw_container):
                             yield item
-                        
+
                         second_raw = second_raw_container[0] if second_raw_container else ""
                         second_parsed = client._try_parse_json(second_raw)
                         if second_parsed and "assistant_text" in second_parsed:

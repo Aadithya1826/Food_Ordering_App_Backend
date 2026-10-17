@@ -5,9 +5,24 @@ import os
 router = APIRouter()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-if GEMINI_MODEL in ["gemini-1.5-pro", "gemini-2.5-pro"]:
-    GEMINI_MODEL = "gemini-1.5-flash"
+# Keep this in sync with app/mcp/client.py. gemini-1.5-* is retired and now
+# 404s, which made this proxy return a 404 body as the assistant's reply.
+DEFAULT_MODEL = "gemini-2.5-flash"
+
+
+def _resolve_model() -> str:
+    model = (
+        os.getenv("GEMINI_MODEL_CHAT")
+        or os.getenv("GEMINI_CHAT_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or DEFAULT_MODEL
+    ).strip()
+    if model in ("gemini-1.5-pro", "gemini-1.5-flash", "gemini-pro", "gemini-3.7-flash"):
+        return DEFAULT_MODEL
+    return model
+
+
+GEMINI_MODEL = _resolve_model()
 
 GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta")
 

@@ -2,6 +2,63 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 
 
+# --------------------------------------------------------------------------- #
+# Gemini structured-output schema
+# --------------------------------------------------------------------------- #
+# Supplying this as `responseSchema` forces the model to emit exactly these
+# keys with these types. Previously we only set responseMimeType=application/json
+# and relied on the prompt + a regex salvage path, so a malformed or truncated
+# reply degraded into "Sorry, I couldn't understand that" - a large share of the
+# agent's apparent fumbling.
+#
+# `assistant_text` is listed first in propertyOrdering on purpose: when
+# streaming, it means the spoken reply starts arriving before the ui_actions
+# array, so TTS can begin almost immediately.
+CUSTOMER_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "assistant_text": {
+            "type": "STRING",
+            "description": "The conversational reply to speak. Must never be empty.",
+        },
+        "transcribed_user_text": {
+            "type": "STRING",
+            "description": "Exact transcription of what the customer said.",
+        },
+        "ui_actions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "action": {"type": "STRING"},
+                    "item": {"type": "STRING"},
+                    "quantity": {"type": "INTEGER"},
+                    "page": {"type": "STRING"},
+                    "name": {"type": "STRING"},
+                    "phone": {"type": "STRING"},
+                    "table": {"type": "STRING"},
+                    "type": {"type": "STRING"},
+                    "stage": {"type": "STRING"},
+                    "method": {"type": "STRING"},
+                    "region": {"type": "STRING"},
+                    "delay_ms": {"type": "INTEGER"},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    "required": ["assistant_text", "ui_actions"],
+    "propertyOrdering": ["assistant_text", "transcribed_user_text", "ui_actions"],
+}
+
+# Used for the second "summarise the tool result" pass, which only needs prose.
+FOLLOWUP_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {"assistant_text": {"type": "STRING"}},
+    "required": ["assistant_text"],
+}
+
+
 class MCPToolRequest(BaseModel):
     tool_name: str
     parameters: Dict[str, Any] = {}
@@ -17,6 +74,9 @@ class MCPTextRequest(BaseModel):
     restaurant_id: Optional[int] = None
     chat_history: Optional[List[ChatMessage]] = None
     audio_base64: Optional[str] = None
+    # Actual MediaRecorder container. Chrome/Firefox -> audio/webm,
+    # Safari -> audio/mp4. Mislabelling this makes Gemini mis-transcribe.
+    audio_mime_type: Optional[str] = None
     is_voice: bool = False
 
 
@@ -25,6 +85,7 @@ class MCPVoiceRequest(BaseModel):
     restaurant_id: Optional[int] = None
     chat_history: Optional[List[ChatMessage]] = None
     audio_base64: Optional[str] = None
+    audio_mime_type: Optional[str] = None
     is_voice: bool = True
 
 
@@ -53,6 +114,7 @@ class CustomerMCPRequest(BaseModel):
     prompt: str = ""
     chat_history: Optional[List[ChatMessage]] = None
     audio_base64: Optional[str] = None  # audio/webm base64 from MediaRecorder
+    audio_mime_type: Optional[str] = None  # actual container (webm/mp4/ogg/wav)
     is_voice: bool = False
     restaurant_id: Optional[int] = None
     order_id: Optional[str] = None
