@@ -3,9 +3,12 @@ import hmac
 import hashlib
 import json
 import logging
+# pyrefly: ignore[missing-import]
 from fastapi import APIRouter, HTTPException, Depends, Request
+# pyrefly: ignore[missing-import]
 from pydantic import BaseModel
 from typing import Optional
+# pyrefly: ignore[missing-import]
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.order import Order
@@ -14,6 +17,7 @@ from ..models.dine_in_session import DineInSession
 logger = logging.getLogger(__name__)
 
 try:
+    # pyrefly: ignore[missing-import]
     import razorpay
 except Exception:
     razorpay = None

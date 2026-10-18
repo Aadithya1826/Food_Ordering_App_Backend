@@ -11,6 +11,7 @@ class CateringPackageResponse(BaseModel):
     minimum_order_quantity: int
     is_available: bool
     items_summary: Optional[str] = None
+    items: Optional[List[str]] = None
 
     class Config:
         from_attributes = True

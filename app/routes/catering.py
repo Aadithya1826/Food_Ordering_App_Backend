@@ -84,7 +84,8 @@ def get_available_packages(restaurant_id: Optional[int] = None, db: Session = De
                 price=row.price,
                 minimum_order_quantity=row.minimum_order_quantity,
                 is_available=row.is_available,
-                items_summary=summary
+                items_summary=summary,
+                items=item_names
             )
         )
         
@@ -119,7 +120,8 @@ def get_package_items(package_code: str, db: Session = Depends(get_db)):
             code=pkg.code,
             price=pkg.price,
             minimum_order_quantity=pkg.minimum_order_quantity,
-            is_available=pkg.is_available
+            is_available=pkg.is_available,
+            items=[i.item_name for i in items if i.item_name]
         ),
         categories=[
             CateringCategoryResponse(name=k, items=v)
