@@ -27,6 +27,7 @@ class Order(Base):
     order_type = Column(String, nullable=True)
     total_amount = Column(Float, nullable=True)
     customer_phone = Column(String, nullable=True, index=True)
+    customer_name = Column(String, nullable=True)
     discount_amount = Column(Float, nullable=True)
     discount_code = Column(String, nullable=True)
     bill_no = Column(Integer, nullable=True)
