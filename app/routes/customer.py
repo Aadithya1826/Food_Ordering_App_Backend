@@ -1,5 +1,8 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, or_, and_, cast, String, text
+
+logger = logging.getLogger(__name__)
 from decimal import Decimal, ROUND_HALF_UP
 
 # pyrefly: ignore [missing-import]
@@ -611,7 +614,7 @@ def get_restaurant(restaurant_id: int = 1, db: Session = Depends(get_db)):
     return restaurant
 
 @router.post("/api/orders")
-def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session = Depends(get_db)):
+def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Request, db: Session = Depends(get_db)):
     try:
         from ..models.delivery import DeliveryAssignment, DeliveryStatusHistory, DeliveryPartner
         from ..models.customer import CustomerAddress
@@ -621,9 +624,60 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         if not restaurant:
             raise HTTPException(status_code=404, detail="Restaurant not found")
 
+        # Resolve customer phone from authenticated token or payload
+        cust_phone = (payload.phone or "").strip()
+        try:
+            caller = resolve_order_caller(request, db)
+            if caller and caller.get("type") == "CUSTOMER" and caller.get("customer"):
+                auth_phone = getattr(caller["customer"], "phone", None)
+                if auth_phone:
+                    cust_phone = auth_phone.strip()
+        except Exception:
+            pass
+
+        # Parse normalized order type
+        backend_order_type = (payload.order_type or "DINE_IN").upper().replace(" ", "_")
+        is_dine_in = backend_order_type in ["DINE_IN", "DINE IN"]
+        is_delivery = backend_order_type == "DELIVERY"
+
+        # STRICT RESTRICTION: Block delivery orders if customer has an active dine-in session
+        if is_delivery and cust_phone:
+            active_sess = db.query(DineInSession).filter(
+                DineInSession.customer_phone == cust_phone,
+                DineInSession.restaurant_id == restaurant_id,
+                DineInSession.status == "ACTIVE"
+            ).first()
+            if active_sess:
+                has_active_orders = db.query(Order).filter(
+                    Order.dine_in_session_id == active_sess.id,
+                    Order.status.notin_(["CANCELLED", "COMPLETED"]),
+                    Order.payment_status.notin_(["Paid", "PAID"])
+                ).first() is not None
+                if has_active_orders:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Dine-In Order In Progress: You have an active dine-in order. Please complete your current dine-in order before proceeding with delivery."
+                    )
+                else:
+                    active_sess.status = "CANCELLED"
+                    db.flush()
+
+            active_order = db.query(Order).filter(
+                Order.customer_phone == cust_phone,
+                Order.restaurant_id == restaurant_id,
+                Order.order_type.in_(["Dine In", "DINE_IN", "DINEIN"]),
+                Order.status.notin_(["CANCELLED", "COMPLETED"]),
+                Order.payment_status.notin_(["Paid", "PAID"])
+            ).first()
+            if active_order:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Dine-In Order In Progress: You have an active dine-in order. Please complete your current dine-in order before proceeding with delivery."
+                )
+
         # For DINE_IN, Order More MUST create a brand new Order row with status PENDING under the active session.
         # It must NEVER mutate the previous order's items or status.
-        is_dine_in_req = (payload.order_type or "DINE_IN").upper() in ["DINE_IN", "DINE IN"]
+        is_dine_in_req = is_dine_in
         if payload.order_id and is_dine_in_req:
             # Look up existing order to inherit table/session context if not passed
             prev_order = db.query(Order).filter(
@@ -716,36 +770,58 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
                 "isAppended": True
             }
 
-        # Find or default table_id — ONLY for Dine-In orders
-        backend_order_type = (payload.order_type or "DINE_IN").upper().replace(" ", "_")
-        is_dine_in = backend_order_type in ["DINE_IN", "DINE IN"]
-        is_delivery = backend_order_type == "DELIVERY"
+        # Table validation — ONLY for Dine-In orders
         if not is_dine_in:
             table_id = None
         else:
-            is_takeaway = (
-                not payload.table_number or 
-                payload.table_number.lower().replace(" ", "").replace("-", "") == "takeaway"
-            )
-            if is_takeaway:
-                table_id = None
-            else:
-                base_num = payload.table_number.replace("T-", "").replace("t-", "").strip()
+            raw_table = (payload.table_number or "").strip()
+            if not raw_table or raw_table.lower() in ["takeaway", "delivery", "none", "null"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Select Your Table First: Please select your dining table before placing a dine-in order."
+                )
+
+            # Robust candidate lookup
+            num_only = raw_table.lstrip("Tt-").lstrip("0") or "0"
+            num_zero = raw_table.lstrip("Tt-")
+            candidates = list(dict.fromkeys([
+                raw_table,
+                f"T-{num_zero}",
+                f"T-{num_only}",
+                num_zero,
+                num_only,
+            ]))
+
+            table = None
+            for candidate in candidates:
                 table = db.query(Table).filter(
-                    (Table.table_number == payload.table_number) |
-                    (Table.table_number == base_num) |
-                    (Table.table_number == f"T-{base_num}"),
+                    Table.table_number == candidate,
                     Table.restaurant_id == restaurant_id
                 ).first()
-                if not table:
-                    table = Table(table_number=payload.table_number, restaurant_id=restaurant_id, capacity=4, status="Occupied")
-                    db.add(table)
-                    db.flush()
-                    db.refresh(table)
-                else:
-                    table.status = "Occupied"
-                    db.flush()
-                table_id = table.id
+                if table:
+                    break
+
+            if not table:
+                table = db.query(Table).filter(
+                    Table.table_number.ilike(f"%{raw_table}%"),
+                    Table.restaurant_id == restaurant_id
+                ).first()
+
+            if not table:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Table '{raw_table}' does not exist for this restaurant. Please select a valid table."
+                )
+
+            if getattr(table, 'is_active', True) is False:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Table '{table.table_number}' is currently inactive. Please select an active dining table."
+                )
+
+            table.status = "Occupied"
+            db.flush()
+            table_id = table.id
 
         norm_method = (payload.payment_method or "").lower().replace(" ", "").replace("_", "")
         is_pay_at_counter = norm_method in ["payatcounter", "counter"]
@@ -829,31 +905,60 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         # Dine-In session linking
         session_obj = None
         if is_dine_in and table_id:
+            candidate_session = None
             if payload.session_id:
-                session_obj = db.query(DineInSession).filter(
+                candidate_session = db.query(DineInSession).filter(
                     DineInSession.id == payload.session_id,
-                    DineInSession.restaurant_id == restaurant_id
-                ).with_for_update().first()
-            if not session_obj and payload.session_uid:
-                session_obj = db.query(DineInSession).filter(
-                    DineInSession.session_uid == payload.session_uid,
-                    DineInSession.restaurant_id == restaurant_id
-                ).with_for_update().first()
-            if not session_obj:
-                # Find current active session for this table
-                session_obj = db.query(DineInSession).filter(
-                    DineInSession.table_id == table_id,
                     DineInSession.restaurant_id == restaurant_id,
                     DineInSession.status == "ACTIVE"
                 ).with_for_update().first()
+            if not candidate_session and payload.session_uid:
+                candidate_session = db.query(DineInSession).filter(
+                    DineInSession.session_uid == payload.session_uid,
+                    DineInSession.restaurant_id == restaurant_id,
+                    DineInSession.status == "ACTIVE"
+                ).with_for_update().first()
+            if not candidate_session:
+                # Find current active session for this table
+                session_query = db.query(DineInSession).filter(
+                    DineInSession.table_id == table_id,
+                    DineInSession.restaurant_id == restaurant_id,
+                    DineInSession.status == "ACTIVE"
+                )
+                if cust_phone:
+                    candidate_session = session_query.filter(
+                        DineInSession.customer_phone == cust_phone
+                    ).with_for_update().first()
+                if not candidate_session:
+                    candidate_session = session_query.with_for_update().first()
+
+            if candidate_session:
+                # Strictly check if candidate_session has active (non-cancelled, unpaid) orders or is fresh (0 orders).
+                # If all existing orders are CANCELLED or PAID, do NOT reuse this dead session!
+                sess_orders = db.query(Order).filter(
+                    Order.dine_in_session_id == candidate_session.id
+                ).all()
+                active_sess_orders = [
+                    o for o in sess_orders 
+                    if (o.status or "").upper() != "CANCELLED" and (o.payment_status or "").upper() != "PAID"
+                ]
+                if sess_orders and not active_sess_orders:
+                    # All previous orders were cancelled (or settled). Mark session CANCELLED so it is never reused.
+                    candidate_session.status = "CANCELLED"
+                    candidate_session.updated_at = datetime.utcnow()
+                    db.flush()
+                    candidate_session = None
+                else:
+                    session_obj = candidate_session
+
             if not session_obj:
-                # Create a new active Dine-In session
+                # Create a fresh new active Dine-In session
                 new_uid = f"SES-{int(time.time())}-{table_id}"
                 session_obj = DineInSession(
                     session_uid=new_uid,
                     restaurant_id=restaurant_id,
                     table_id=table_id,
-                    customer_phone=payload.phone.strip() if payload.phone else None,
+                    customer_phone=cust_phone if cust_phone else (payload.phone.strip() if payload.phone else None),
                     status="ACTIVE",
                     payment_status="Pending",
                     total_amount=0.0
@@ -866,6 +971,7 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
         if is_dine_in_req and session_obj:
             existing_sibling_bill = db.query(Order.bill_no).filter(
                 Order.dine_in_session_id == session_obj.id,
+                Order.status != "CANCELLED",
                 Order.bill_no.isnot(None)
             ).first()
             if existing_sibling_bill and existing_sibling_bill[0]:
@@ -892,7 +998,7 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             delivery_fee=delivery_fee,
             packaging_fee=packaging_fee,
             tip_amount=tip_amount,
-            customer_phone=payload.phone.strip() if payload.phone else None,
+            customer_phone=cust_phone if cust_phone else (payload.phone.strip() if payload.phone else None),
             discount_amount=discount_amount,
             discount_code=payload.discount_code,
         )
@@ -970,6 +1076,9 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             "isAppended": False,
             "delivery_address": delivery_snapshot
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         import logging
@@ -1173,6 +1282,22 @@ def get_or_create_active_dine_in_session(
             DineInSession.status == "ACTIVE"
         ).with_for_update().first()
 
+        if session_obj:
+            # Check if all orders under this session are cancelled or settled
+            sess_orders = db.query(Order).filter(
+                Order.dine_in_session_id == session_obj.id,
+                Order.restaurant_id == payload.restaurant_id
+            ).all()
+            active_orders = [
+                o for o in sess_orders 
+                if (o.status or "").upper() != "CANCELLED" and (o.payment_status or "").upper() != "PAID"
+            ]
+            if sess_orders and not active_orders:
+                session_obj.status = "CANCELLED"
+                session_obj.updated_at = datetime.utcnow()
+                db.flush()
+                session_obj = None
+
         if not session_obj:
             new_uid = f"SES-{int(time.time())}-{table.id}"
             session_obj = DineInSession(
@@ -1201,15 +1326,17 @@ def get_or_create_active_dine_in_session(
             Order.restaurant_id == payload.restaurant_id
         ).order_by(Order.id.asc()).all()
 
+        active_orders = [o for o in session_orders if (o.status or "").upper() != "CANCELLED"]
         total_accumulated = sum(
             float(o.total_amount or 0.0) 
-            for o in session_orders 
-            if (o.status or "").upper() != "CANCELLED"
+            for o in active_orders
         )
 
+        display_orders = active_orders if active_orders else session_orders
         orders_data = []
-        for o in session_orders:
+        for idx, o in enumerate(display_orders, 1):
             orders_data.append({
+                "round": idx,
                 "id": o.id,
                 "orderId": f"ORD-{str(o.id).zfill(6)}",
                 "status": o.status,
@@ -1227,6 +1354,7 @@ def get_or_create_active_dine_in_session(
                         "image": getattr(oi.menu_item, "image_url", None) if oi.menu_item else None
                     }
                     for oi in o.items
+                    if (o.status or "").upper() == "CANCELLED" or (getattr(oi, "status", None) or "").upper() != "CANCELLED"
                 ]
             })
 
@@ -1290,9 +1418,14 @@ def get_dine_in_session_details(
 
     all_items_flat = []
     orders_data = []
-    for idx, o in enumerate(session_orders, 1):
+    # If active orders exist, ONLY return active orders as rounds!
+    # If all orders in the session were cancelled, return them so the screen can render the Cancelled Order Summary
+    display_orders = active_orders if active_orders else session_orders
+    for idx, o in enumerate(display_orders, 1):
         order_items = []
+        is_order_cancelled = (o.status or "").upper() == "CANCELLED"
         for oi in o.items:
+            is_item_cancelled = (getattr(oi, "status", None) or "").upper() == "CANCELLED"
             item_entry = {
                 "id": oi.id,
                 "order_id": oi.order_id,
@@ -1304,7 +1437,8 @@ def get_dine_in_session_details(
                 "image": getattr(oi.menu_item, "image_url", None) if oi.menu_item else None
             }
             order_items.append(item_entry)
-            all_items_flat.append(item_entry)
+            if not is_order_cancelled and not is_item_cancelled:
+                all_items_flat.append(item_entry)
 
         orders_data.append({
             "round": idx,
