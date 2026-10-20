@@ -429,6 +429,29 @@ def get_available_orders(current_rider=Depends(get_current_rider), db: Session =
         DeliveryAssignment.rider_id == current_rider.id
     ).all()
 
+    # If no pending offer and rider is available, online, and active, attempt to dispatch any waiting unassigned orders
+    if not rider_assignments and current_rider.is_online and current_rider.is_active and current_rider.is_available:
+        try:
+            unassigned_order_ids = [
+                row[0] for row in db.query(Order.id).join(
+                    DeliveryAssignment, DeliveryAssignment.order_id == Order.id
+                ).filter(
+                    Order.order_type.ilike("DELIVERY"),
+                    Order.status.notin_(["CANCELLED", "COMPLETED", "SERVED"]),
+                    DeliveryAssignment.status == "UNASSIGNED",
+                    DeliveryAssignment.rider_id.is_(None)
+                ).order_by(Order.created_at.asc()).limit(3).all()
+            ]
+            if unassigned_order_ids:
+                from ..services.dispatch import dispatch_order
+                for u_id in unassigned_order_ids:
+                    dispatched = dispatch_order(db, u_id)
+                    if dispatched and dispatched.rider_id == current_rider.id and dispatched.status == "ASSIGNED":
+                        rider_assignments.append(dispatched)
+                        break
+        except Exception as _disp_err:
+            logger.error(f"Error in on-demand dispatch during poll: {_disp_err}")
+
     result = []
     for assignment in rider_assignments:
         order = db.query(Order).filter(
@@ -750,12 +773,22 @@ def get_rider_vehicle(current_rider=Depends(get_current_rider), db: Session = De
         raise HTTPException(status_code=404, detail="Rider not found")
     return {
         "vehicle_type": rider.vehicle_type,
+        "vehicle_ownership": rider.vehicle_ownership,
         "vehicle_number": rider.vehicle_number,
+        "vehicle_brand": rider.vehicle_brand,
+        "vehicle_model": rider.vehicle_model,
+        "fuel_type": rider.fuel_type,
+        "vehicle_color": rider.vehicle_color,
     }
 
 class VehicleUpdatePayload(BaseModel):
     vehicle_type: Optional[str] = None
+    vehicle_ownership: Optional[str] = None
     vehicle_number: Optional[str] = None
+    vehicle_brand: Optional[str] = None
+    vehicle_model: Optional[str] = None
+    fuel_type: Optional[str] = None
+    vehicle_color: Optional[str] = None
 
 @router.patch("/api/v1/riders/me/vehicle")
 def update_rider_vehicle(payload: VehicleUpdatePayload, current_rider=Depends(get_current_rider), db: Session = Depends(get_db)):
@@ -765,13 +798,28 @@ def update_rider_vehicle(payload: VehicleUpdatePayload, current_rider=Depends(ge
     
     if payload.vehicle_type is not None:
         rider.vehicle_type = payload.vehicle_type
+    if payload.vehicle_ownership is not None:
+        rider.vehicle_ownership = payload.vehicle_ownership
     if payload.vehicle_number is not None:
         rider.vehicle_number = payload.vehicle_number
+    if payload.vehicle_brand is not None:
+        rider.vehicle_brand = payload.vehicle_brand
+    if payload.vehicle_model is not None:
+        rider.vehicle_model = payload.vehicle_model
+    if payload.fuel_type is not None:
+        rider.fuel_type = payload.fuel_type
+    if payload.vehicle_color is not None:
+        rider.vehicle_color = payload.vehicle_color
         
     db.commit()
     return {
         "vehicle_type": rider.vehicle_type,
+        "vehicle_ownership": rider.vehicle_ownership,
         "vehicle_number": rider.vehicle_number,
+        "vehicle_brand": rider.vehicle_brand,
+        "vehicle_model": rider.vehicle_model,
+        "fuel_type": rider.fuel_type,
+        "vehicle_color": rider.vehicle_color,
     }
 
 class RiderDocumentPayload(BaseModel):

@@ -812,9 +812,10 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             calculated_subtotal += price * qty
             validated_items.append((db_item.id, qty, price))
 
-        # Re-apply fees from backend calculation where possible, or trust payload for non-critical fees
-        # Ideally delivery_fee should be calculated, but using payload for now if not strictly defined in requirements
+        # Delivery fee from payload or standard 100 base fee
         delivery_fee = float(payload.delivery_fee) if payload.delivery_fee else 0.0
+        if backend_order_type == "DELIVERY" and delivery_fee <= 0.0:
+            delivery_fee = 100.0
         packaging_fee = float(payload.packaging_fee) if payload.packaging_fee else 0.0
         tip_amount = float(payload.tip_amount) if payload.tip_amount else 0.0
         discount_amount = float(payload.discount_amount) if payload.discount_amount else 0.0
@@ -941,6 +942,13 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             )
             db.add(history)
             db.commit()
+
+            # Automatically dispatch to the nearest available online rider
+            try:
+                from ..services.dispatch import dispatch_order
+                dispatch_order(db, new_order.id)
+            except Exception as _disp_err:
+                logger.error(f"Failed to auto-dispatch order {new_order.id}: {_disp_err}")
         else:
             db.commit()
 

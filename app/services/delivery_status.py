@@ -238,7 +238,7 @@ def sync_order_delivery_on_status_change(db: Session, order: Order, new_restaura
     }
 
     if new_status_upper == "PREPARING":
-        if not assignment or assignment.status in ["CANCELLED", "REJECTED", "FAILED"]:
+        if not assignment or assignment.status in ["UNASSIGNED", "CANCELLED", "REJECTED", "FAILED"] or assignment.rider_id is None:
             from .dispatch import dispatch_order
             dispatched_assignment = dispatch_order(db, order.id)
 
@@ -252,7 +252,7 @@ def sync_order_delivery_on_status_change(db: Session, order: Order, new_restaura
                 )
                 db.add(history)
         else:
-            # Assignment exists
+            # Assignment exists with assigned rider
             if assignment.status == "PENDING" or assignment.status == "ASSIGNED":
                 assignment.status = "ASSIGNED"
                 order.delivery_status = "RIDER_ASSIGNED"
@@ -270,7 +270,19 @@ def sync_order_delivery_on_status_change(db: Session, order: Order, new_restaura
             db.add(history)
 
     elif new_status_upper == "READY":
-        if assignment and assignment.status not in ["CANCELLED", "REJECTED", "FAILED", "DELIVERED"]:
+        if not assignment or assignment.status in ["UNASSIGNED", "CANCELLED", "REJECTED", "FAILED"] or assignment.rider_id is None:
+            from .dispatch import dispatch_order
+            dispatched_assignment = dispatch_order(db, order.id)
+            if not dispatched_assignment:
+                order.delivery_status = "RIDER_SEARCHING"
+                history = DeliveryStatusHistory(
+                    order_id=order.id,
+                    status="RIDER_SEARCHING",
+                    notes="Order is READY; searching for rider.",
+                    created_at=now
+                )
+                db.add(history)
+        elif assignment and assignment.status not in ["CANCELLED", "REJECTED", "FAILED", "DELIVERED"]:
             if assignment.status == "PENDING" or assignment.status == "ASSIGNED":
                 assignment.status = "ASSIGNED"
                 order.delivery_status = "RIDER_ASSIGNED"

@@ -116,15 +116,18 @@ async def mobile_agent_tool(
             category_name = str(args.get("category_name", "")).lower().strip()
             restaurant_id = request.restaurant_id
 
-            if not restaurant_id:
-                return {"success": False, "code": "NO_RESTAURANT_SELECTED", "error": "Please select a restaurant outlet first."}
-
-            q = db.query(MenuItem).filter(MenuItem.is_available == True)
-            q = q.filter(MenuItem.restaurant_id == restaurant_id)
-            items = q.all()
-
-            cat_q = db.query(MenuCategory).filter(MenuCategory.restaurant_id == restaurant_id)
-            all_categories = cat_q.all()
+            q = db.query(MenuItem).filter(MenuItem.is_available == True, MenuItem.is_deleted == False)
+            if restaurant_id:
+                items = q.filter(MenuItem.restaurant_id == restaurant_id).all()
+                cat_q = db.query(MenuCategory).filter(MenuCategory.restaurant_id == restaurant_id)
+                all_categories = cat_q.all()
+                # If query specified and no items in current outlet, search all outlets as graceful fallback
+                if query_str and len(items) == 0:
+                    items = q.all()
+                    all_categories = db.query(MenuCategory).all()
+            else:
+                items = q.all()
+                all_categories = db.query(MenuCategory).all()
 
             # Filter by category name if provided
             if category_name:
@@ -133,26 +136,87 @@ async def mobile_agent_tool(
                     c.id for c in all_categories
                     if clean_cat in c.name.lower() or c.name.lower() in clean_cat
                 ]
-                if not cat_ids:
-                    return {"success": False, "code": "CATEGORY_NOT_FOUND", "error": f"The category '{category_name}' does not exist on this restaurant's menu."}
-                items = [i for i in items if i.category_id in cat_ids]
+                if cat_ids:
+                    items = [i for i in items if i.category_id in cat_ids]
+                else:
+                    # Fallback: search items directly for category_name/clean_cat
+                    matched_items = [
+                        i for i in items
+                        if clean_cat in i.name.lower() or (i.description and clean_cat in i.description.lower())
+                    ]
+                    if matched_items:
+                        items = matched_items
+                    else:
+                        cat_names = ", ".join([c.name for c in all_categories[:6]])
+                        return {"success": False, "code": "CATEGORY_NOT_FOUND", "error": f"The category '{category_name}' was not found. Available categories include: {cat_names}."}
 
             # Filter by search query
             if query_str:
+                query_lower = query_str.lower().strip()
                 # Remove common voice-bot conversational fluff
-                noise_words = ["varieties", "items", "please", "some", "show", "me", "list"]
-                keywords = [kw for kw in query_str.split() if kw not in noise_words]
+                noise_words = {"varieties", "items", "please", "some", "show", "me", "list", "order", "want", "give", "add"}
+                keywords = [kw for kw in query_lower.split() if kw not in noise_words and len(kw) > 1]
                 
                 if keywords:
-                    filtered_items = []
+                    scored_items = []
                     for i in items:
                         name_lower = i.name.lower()
                         desc_lower = (i.description or "").lower()
-                        # If ANY important keyword is in the name or description, include it
-                        if any(kw in name_lower or kw in desc_lower for kw in keywords):
-                            filtered_items.append(i)
+                        
+                        score = 0
+                        # Exact name match gets highest priority
+                        if query_lower == name_lower:
+                            score += 200
+                        elif query_lower in name_lower:
+                            score += 100
+                        
+                        # Match individual keywords
+                        matched_kw = 0
+                        for kw in keywords:
+                            if kw in name_lower:
+                                score += 20
+                                matched_kw += 1
+                            elif kw in desc_lower:
+                                score += 5
+                                matched_kw += 1
+                        
+                        # Bonus if ALL keywords match
+                        if matched_kw == len(keywords):
+                            score += 50
+                            
+                        if score > 0:
+                            scored_items.append((score, i))
                     
-                    items = filtered_items
+                    # If outlet items had no strong match (score < 50), search all outlets for better match
+                    if restaurant_id and (not scored_items or scored_items[0][0] < 50):
+                        all_items = db.query(MenuItem).filter(MenuItem.is_available == True, MenuItem.is_deleted == False).all()
+                        global_scored = []
+                        for gi in all_items:
+                            g_name = gi.name.lower()
+                            g_desc = (gi.description or "").lower()
+                            g_score = 0
+                            if query_lower == g_name:
+                                g_score += 200
+                            elif query_lower in g_name:
+                                g_score += 100
+                            g_matched = 0
+                            for kw in keywords:
+                                if kw in g_name:
+                                    g_score += 20
+                                    g_matched += 1
+                                elif kw in g_desc:
+                                    g_score += 5
+                                    g_matched += 1
+                            if g_matched == len(keywords):
+                                g_score += 50
+                            if g_score >= 50:
+                                global_scored.append((g_score, gi))
+                        if global_scored:
+                            scored_items = global_scored
+
+                    # Sort by highest score first
+                    scored_items.sort(key=lambda x: x[0], reverse=True)
+                    items = [x[1] for x in scored_items]
 
             if not items:
                 if query_str:
@@ -171,8 +235,10 @@ async def mobile_agent_tool(
                         "description": i.description,
                         "is_available": i.is_available,
                         "category_id": i.category_id,
+                        "image": getattr(i, "image_url", None),
+                        "image_url": getattr(i, "image_url", None),
                     }
-                    for i in items[:20]  # Cap at 20 items
+                    for i in items[:30]  # Return top 30 relevant items
                 ],
                 "count": len(items),
             }

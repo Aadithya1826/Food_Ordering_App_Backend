@@ -222,7 +222,7 @@ def dispatch_order(db: Session, order_id: int):
         history = DeliveryStatusHistory(
             order_id=order.id,
             rider_id=locked_rider.id,
-            status="ASSIGNED",
+            status="RIDER_ASSIGNED",
             notes=f"Central Dispatcher assigned rider {locked_rider.id} ({candidate['type']})",
             created_at=now
         )
