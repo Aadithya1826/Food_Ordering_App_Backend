@@ -208,17 +208,27 @@ def list_waiters(
 ):
     """
     List all waiters.
-    - SUPER_ADMIN: sees all waiters, optionally filtered by restaurant_id.
+    - SUPER_ADMIN / ADMIN: sees all waiters, optionally filtered by restaurant_id (always keeping pending waiters).
     - HOTEL_ADMIN: sees only waiters assigned to their restaurant.
     """
-    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    require_role(user, ["SUPER_ADMIN", "ADMIN", "HOTEL_ADMIN"])
+
+    from sqlalchemy import or_
 
     q = db.query(User).filter(User.role == "WAITER")
 
     if user.role == "HOTEL_ADMIN":
         q = q.filter(User.restaurant_id == user.restaurant_id)
     elif restaurant_id is not None:
-        q = q.filter(User.restaurant_id == restaurant_id)
+        # If filtered by restaurant, also include unassigned pending waiters so approvals are never hidden
+        q = q.filter(
+            or_(
+                User.restaurant_id == restaurant_id,
+                User.restaurant_id.is_(None),
+                User.is_approved.is_(False),
+                User.is_approved.is_(None),
+            )
+        )
 
     waiters = q.order_by(User.created_at.desc()).all()
 
@@ -246,10 +256,10 @@ def approve_waiter(
 ):
     """
     Approve a pending waiter and assign them to exactly one existing hotel.
-    - SUPER_ADMIN: can assign to any restaurant.
+    - SUPER_ADMIN / ADMIN: can assign to any restaurant.
     - HOTEL_ADMIN: can only assign to their own restaurant.
     """
-    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    require_role(user, ["SUPER_ADMIN", "ADMIN", "HOTEL_ADMIN"])
 
     if user.role == "HOTEL_ADMIN" and data.restaurant_id != user.restaurant_id:
         raise HTTPException(
@@ -291,7 +301,7 @@ def update_waiter(
     Update waiter name, is_active, restaurant_id, or is_approved.
     HOTEL_ADMIN can only modify waiters in their own restaurant.
     """
-    require_role(user, ["SUPER_ADMIN", "HOTEL_ADMIN"])
+    require_role(user, ["SUPER_ADMIN", "ADMIN", "HOTEL_ADMIN"])
 
     waiter = db.query(User).filter(User.id == waiter_id, User.role == "WAITER").first()
     if not waiter:
@@ -320,8 +330,8 @@ def delete_waiter(
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Remove a waiter account. SUPER_ADMIN only."""
-    require_role(user, ["SUPER_ADMIN"])
+    """Remove a waiter account. SUPER_ADMIN / ADMIN only."""
+    require_role(user, ["SUPER_ADMIN", "ADMIN"])
 
     waiter = db.query(User).filter(User.id == waiter_id, User.role == "WAITER").first()
     if not waiter:

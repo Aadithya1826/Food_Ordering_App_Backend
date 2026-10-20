@@ -412,7 +412,6 @@ def create_pos_order(
         
         if payload.timestamp:
             try:
-                from datetime import datetime
                 ts = payload.timestamp.replace('Z', '+00:00')
                 dt = datetime.fromisoformat(ts)
                 new_order.created_at = dt.replace(tzinfo=None)
