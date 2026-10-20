@@ -8,6 +8,7 @@ from ..models.order import Order, OrderItem
 from ..models.menu import MenuItem
 from ..models.restaurant import Restaurant
 from ..models.customer import Customer
+from ..models.user import User
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id
 
@@ -657,9 +658,18 @@ def _build_sales_report(
             item_aggregates[key]["qty"] += item.quantity
             item_aggregates[key]["amount"] += item.quantity * rate
 
+    # ── Batch resolve placed_by user names (cashier/waiter) ─────────────────
+    user_ids = {o.user_id for o in all_orders if getattr(o, "user_id", None)}
+    user_map = {}
+    if user_ids:
+        users = db.query(User).filter(User.id.in_(user_ids)).all()
+        for u in users:
+            user_map[u.id] = u.name
+
     # ── Build detailed orders history list ──────────────────────────────────
     orders_list = []
     for o in all_orders:
+        placed_by_name = user_map.get(o.user_id) if o.user_id else None
         amount = float(o.total_amount or 0.0)
         local_time = o.created_at + timedelta(hours=5, minutes=30)
 
@@ -725,6 +735,8 @@ def _build_sales_report(
             "time": local_time.strftime("%I:%M:%S %p"),
             "date_time": local_time.strftime("%d/%m/%Y, %I:%M %p"),
             "created_at": local_time.isoformat(),
+            "placed_by_user_id": o.user_id,
+            "placed_by_name": placed_by_name,
             "items_count": sum(it["quantity"] for it in order_items),
             "items_summary": ", ".join(summary_items) if summary_items else "No items",
             "items": order_items

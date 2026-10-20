@@ -9,3 +9,4 @@ scratch/
 cloudflared*
 dataudipi.db
 *.db
+inspect_schema.py

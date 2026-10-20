@@ -85,7 +85,7 @@ def resolve_restaurant_id(user, restaurant_id: int | None = None) -> int | None:
     if user.role == "SUPER_ADMIN":
         return restaurant_id
 
-    if user.role in ["HOTEL_ADMIN", "CASHIER"]:
+    if user.role in ["HOTEL_ADMIN", "CASHIER", "WAITER"]:
         if user.restaurant_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

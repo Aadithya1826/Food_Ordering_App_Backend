@@ -28,7 +28,7 @@ def get_live_orders(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "WAITER", "CASHIER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     # Strictly isolate DINE_IN:
@@ -93,8 +93,18 @@ def get_live_orders(
             except Exception:
                 pass
 
+        # Resolve placed_by (cashier/waiter who created the order)
+        placed_by_name = None
+        placed_by_user_id = o.user_id
+        if o.user_id:
+            from ..models.user import User
+            placed_by_user = db.query(User).filter(User.id == o.user_id).first()
+            if placed_by_user:
+                placed_by_name = placed_by_user.name
+
         response.append({
             "order_id": o.id,
+            "restaurant_id": o.restaurant_id,
             "branch_order_id": o.branch_order_id,
             "bill_no": o.bill_no,
             "table_number": resolve_order_table_number(o, table_number_map),
@@ -110,6 +120,8 @@ def get_live_orders(
             "delivery_address": o.delivery_address_snapshot,
             "dine_in_session_id": o.dine_in_session_id,
             "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
+            "placed_by_user_id": placed_by_user_id,
+            "placed_by_name": placed_by_name,
         })
 
     return response
@@ -318,7 +330,7 @@ def create_pos_order(
     db: Session = Depends(get_db)
 ):
     try:
-        require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+        require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER", "WAITER"])
         res_id = resolve_restaurant_id(user, restaurant_id)
         if not res_id:
             raise HTTPException(status_code=400, detail="restaurant_id is required")

@@ -266,6 +266,25 @@ def delete_manager(manager_id: int, user = Depends(get_current_user), db: Sessio
     return {"status": "success", "message": "Manager deleted successfully"}
 
 
+@router.get("/api/v1/auth/me")
+def get_current_user_info(user = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return profile of currently authenticated user with their assigned restaurant."""
+    restaurant = None
+    if user.restaurant_id:
+        restaurant = db.query(Restaurant).filter(Restaurant.id == user.restaurant_id).first()
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "phone": getattr(user, "phone", None),
+        "role": user.role,
+        "restaurant_id": user.restaurant_id,
+        "restaurant_name": restaurant.name if restaurant else None,
+        "is_active": user.is_active,
+        "is_approved": getattr(user, "is_approved", None),
+    }
+
+
 @router.post("/api/v1/auth/refresh")
 def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
     """
@@ -295,6 +314,9 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
         user = db.query(User).filter(User.id == int(user_id)).first()
         if not user or not user.is_active:
             raise HTTPException(status_code=401, detail="User not found or inactive")
+
+        if user.role == "WAITER" and not user.is_approved:
+            raise HTTPException(status_code=403, detail="Account pending approval")
             
         # Create new token
         new_token = create_token(user)
@@ -309,6 +331,10 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
             secure=False,
             samesite="lax"
         )
+
+        restaurant = None
+        if user.restaurant_id:
+            restaurant = db.query(Restaurant).filter(Restaurant.id == user.restaurant_id).first()
         
         return {
             "access_token": new_token,
@@ -317,8 +343,13 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
                 "id": user.id,
                 "name": user.name,
                 "role": user.role,
-                "restaurant_id": user.restaurant_id
+                "restaurant_id": user.restaurant_id,
+                "restaurant_name": restaurant.name if restaurant else None,
+                "phone": getattr(user, "phone", None),
+                "is_approved": getattr(user, "is_approved", None),
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=401, detail="Could not refresh token")
+        raise HTTPException(status_code=401, detail="Could not refresh token")

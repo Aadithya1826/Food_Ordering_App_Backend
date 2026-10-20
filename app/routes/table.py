@@ -26,7 +26,7 @@ def get_tables(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER", "WAITER"])
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
 
     query = db.query(Table)
@@ -71,7 +71,7 @@ def get_tables(
 # GET single table
 @router.get("/api/v1/tables/{table_id}", response_model=TableResponse)
 def get_table(table_id: int, user = Depends(get_current_user), db: Session = Depends(get_db)):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER", "WAITER"])
 
     table = db.query(Table).filter(Table.id == table_id).first()
     if not table:
