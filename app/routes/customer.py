@@ -717,8 +717,9 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             }
 
         # Find or default table_id — ONLY for Dine-In orders
-        is_dine_in = (payload.order_type or "DINE_IN").upper() in ["DINE_IN", "DINE IN"]
-        is_delivery = (payload.order_type or "").upper() == "DELIVERY"
+        backend_order_type = (payload.order_type or "DINE_IN").upper().replace(" ", "_")
+        is_dine_in = backend_order_type in ["DINE_IN", "DINE IN"]
+        is_delivery = backend_order_type == "DELIVERY"
         if not is_dine_in:
             table_id = None
         else:
@@ -812,10 +813,13 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, db: Session =
             calculated_subtotal += price * qty
             validated_items.append((db_item.id, qty, price))
 
-        # Delivery fee from payload or standard 100 base fee
-        delivery_fee = float(payload.delivery_fee) if payload.delivery_fee else 0.0
-        if backend_order_type == "DELIVERY" and delivery_fee <= 0.0:
-            delivery_fee = 100.0
+        # Delivery fee from payload or standard 100 base fee (only for DELIVERY)
+        if backend_order_type == "DELIVERY":
+            delivery_fee = float(payload.delivery_fee) if payload.delivery_fee else 100.0
+            if delivery_fee <= 0.0:
+                delivery_fee = 100.0
+        else:
+            delivery_fee = 0.0
         packaging_fee = float(payload.packaging_fee) if payload.packaging_fee else 0.0
         tip_amount = float(payload.tip_amount) if payload.tip_amount else 0.0
         discount_amount = float(payload.discount_amount) if payload.discount_amount else 0.0
