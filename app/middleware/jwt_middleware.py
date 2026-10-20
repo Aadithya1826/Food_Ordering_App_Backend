@@ -104,8 +104,8 @@ def check_restaurant_access(
     if user.role == "SUPER_ADMIN":
         return True
     
-    # HOTEL_ADMIN and CASHIER can only access their own restaurant
-    if user.role in ["HOTEL_ADMIN", "CASHIER"]:
+    # HOTEL_ADMIN, CASHIER, and WAITER can only access their own restaurant
+    if user.role in ["HOTEL_ADMIN", "CASHIER", "WAITER"]:
         if user.restaurant_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

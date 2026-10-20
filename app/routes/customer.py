@@ -622,7 +622,15 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
         
         restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
         if not restaurant:
-            raise HTTPException(status_code=404, detail="Restaurant not found")
+            # If restaurant not found, check if items in cart belong to a valid restaurant
+            if payload.cart and len(payload.cart) > 0:
+                first_item = db.query(MenuItem).filter(MenuItem.id == payload.cart[0].id).first()
+                if first_item:
+                    restaurant = db.query(Restaurant).filter(Restaurant.id == first_item.restaurant_id).first()
+                    if restaurant:
+                        restaurant_id = restaurant.id
+            if not restaurant:
+                raise HTTPException(status_code=404, detail="Restaurant not found")
 
         # Resolve customer phone from authenticated token or payload
         cust_phone = (payload.phone or "").strip()
@@ -883,7 +891,15 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
         for item in payload.cart:
             db_item = db.query(MenuItem).filter(MenuItem.id == item.id, MenuItem.restaurant_id == restaurant_id).first()
             if not db_item:
-                raise HTTPException(status_code=404, detail=f"Menu item {item.id} not found in this restaurant")
+                fallback_source = db.query(MenuItem).filter(MenuItem.id == item.id).first()
+                if fallback_source:
+                    db_item = db.query(MenuItem).filter(
+                        MenuItem.name == fallback_source.name,
+                        MenuItem.restaurant_id == restaurant_id,
+                        MenuItem.is_deleted == False
+                    ).first()
+                if not db_item:
+                    raise HTTPException(status_code=404, detail=f"Menu item {item.id} not found in this restaurant")
             qty = max(1, item.quantity)
             price = float(db_item.price)
             calculated_subtotal += price * qty
