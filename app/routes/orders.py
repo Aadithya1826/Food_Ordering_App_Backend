@@ -31,6 +31,7 @@ def get_live_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "WAITER", "CASHIER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
+    cutoff = datetime.utcnow() - timedelta(hours=12)
     # Strictly isolate DINE_IN:
     # Takeaway and Delivery are filtered when status == 'SERVED' (unchanged).
     # Active unpaid DINE_IN orders remain visible if they are not SERVED OR if they have newly appended pending kitchen items.
@@ -40,6 +41,7 @@ def get_live_orders(
         Order.status != "CANCELLED",
         or_(
             Order.status != "SERVED",
+            Order.created_at >= cutoff,
             (
                 (Order.order_type == "DINE_IN") &
                 (Order.payment_status != "Paid") &
@@ -71,13 +73,15 @@ def get_live_orders(
         p_status = o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED"] else "Pending")
 
         # Resolve customer name and phone
-        customer_name = o.customer_phone or "Guest"
-        customer_phone = o.customer_phone or ""
-        if o.customer_phone:
+        customer_name = getattr(o, 'customer_name', None)
+        customer_phone = getattr(o, 'customer_phone', None) or o.customer_phone or ""
+        if not customer_name and o.customer_phone:
             from ..models.customer import Customer
             cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
             if cust and cust.name:
                 customer_name = cust.name
+        if not customer_name:
+            customer_name = o.customer_phone or "Guest"
 
         # Fallback to delivery_address_snapshot
         if (not customer_name or customer_name in ["Guest", customer_phone]) and o.delivery_address_snapshot:
@@ -259,13 +263,15 @@ def get_all_orders(
         p_status = o.payment_status or ("Paid" if o.status in ["SERVED", "COMPLETED"] else "Pending")
 
         # Resolve customer name and phone
-        customer_name = o.customer_phone or "Guest"
-        customer_phone = o.customer_phone or ""
-        if o.customer_phone:
+        customer_name = getattr(o, 'customer_name', None)
+        customer_phone = getattr(o, 'customer_phone', None) or o.customer_phone or ""
+        if not customer_name and o.customer_phone:
             from ..models.customer import Customer
             cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
             if cust and cust.name:
                 customer_name = cust.name
+        if not customer_name:
+            customer_name = o.customer_phone or "Guest"
 
         # Fallback to delivery_address_snapshot
         if (not customer_name or customer_name in ["Guest", customer_phone]) and o.delivery_address_snapshot:
@@ -318,6 +324,7 @@ class PosOrderPayload(BaseModel):
     total_amount: float = 0
     bill_no: Optional[int] = None
     timestamp: Optional[str] = None
+    customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
 
 from ..models.table import Table
@@ -337,7 +344,8 @@ def create_pos_order(
 
         is_takeaway = (
             not payload.table_number or 
-            payload.table_number.lower().replace(" ", "").replace("-", "") == "takeaway"
+            payload.table_number.lower().replace(" ", "").replace("-", "") == "takeaway" or
+            (payload.order_type and payload.order_type.upper() == "TAKEAWAY")
         )
         if is_takeaway:
             table_id = None
@@ -356,7 +364,11 @@ def create_pos_order(
                 db.refresh(table)
             table_id = table.id
 
-        status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
+        # Takeaway orders show in Live Orders (KDS) under "New Orders" as PENDING so kitchen can prepare them
+        if is_takeaway or (payload.order_type and payload.order_type.upper() == "TAKEAWAY"):
+            status = "PENDING"
+        else:
+            status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
         payment_status = "Paid" if payload.payment_method.lower() in ["cash", "upi", "card"] else "Pending"
 
         # Calculate continuous branch_order_id
@@ -378,6 +390,9 @@ def create_pos_order(
                 active_sess.total_amount = float(active_sess.total_amount or 0.0) + float(payload.total_amount or 0.0)
                 active_sess.updated_at = datetime.utcnow()
 
+        cust_name_clean = payload.customer_name.strip() if payload.customer_name and payload.customer_name.strip() else None
+        cust_phone_clean = payload.customer_phone.strip() if payload.customer_phone and payload.customer_phone.strip() else None
+
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
@@ -391,7 +406,8 @@ def create_pos_order(
             order_type=pos_order_type,
             bill_no=payload.bill_no,
             branch_order_id=next_branch_order_id,
-            customer_phone=payload.customer_phone
+            customer_name=cust_name_clean,
+            customer_phone=cust_phone_clean
         )
         
         if payload.timestamp:
@@ -406,6 +422,19 @@ def create_pos_order(
         db.add(new_order)
         db.commit()
         db.refresh(new_order)
+
+        if cust_phone_clean:
+            try:
+                from ..models.customer import Customer
+                cust = db.query(Customer).filter(Customer.phone == cust_phone_clean).first()
+                if not cust and cust_name_clean:
+                    db.add(Customer(phone=cust_phone_clean, name=cust_name_clean))
+                    db.commit()
+                elif cust and cust_name_clean and (not cust.name or cust.name == "Guest"):
+                    cust.name = cust_name_clean
+                    db.commit()
+            except Exception as e:
+                print("Customer sync note:", e)
 
         for item in payload.cart:
             order_item = OrderItem(
