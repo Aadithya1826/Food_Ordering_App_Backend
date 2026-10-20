@@ -331,3 +331,48 @@ def remove_customer_favorite(
         db.commit()
         
     return {"success": True, "message": "Removed from favorites"}
+
+@router.get("/api/v1/public/maps/autocomplete")
+def maps_autocomplete(input: str):
+    """Proxy for Google Maps Place Autocomplete to prevent CORS errors on Web."""
+    import os
+    import requests
+    key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    if not key:
+        return {"status": "ERROR", "predictions": [], "error_message": "GOOGLE_MAPS_API_KEY not configured"}
+    if not input or len(input.strip()) < 2:
+        return {"status": "OK", "predictions": []}
+    try:
+        url = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
+        params = {
+            "input": input.strip(),
+            "key": key,
+            "components": "country:in"
+        }
+        resp = requests.get(url, params=params, timeout=5)
+        return resp.json()
+    except Exception as e:
+        logger.error(f"Error calling Google Maps autocomplete: {e}")
+        return {"status": "ERROR", "predictions": [], "error_message": str(e)}
+
+@router.get("/api/v1/public/maps/geocode")
+def maps_geocode(address: str):
+    """Proxy for Google Maps Geocoding to validate address without CORS."""
+    import os
+    import requests
+    key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    if not key:
+        return {"status": "ERROR", "results": [], "error_message": "GOOGLE_MAPS_API_KEY not configured"}
+    if not address or len(address.strip()) < 2:
+        return {"status": "ZERO_RESULTS", "results": []}
+    try:
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "address": address.strip(),
+            "key": key
+        }
+        resp = requests.get(url, params=params, timeout=5)
+        return resp.json()
+    except Exception as e:
+        logger.error(f"Error calling Google Maps geocode: {e}")
+        return {"status": "ERROR", "results": [], "error_message": str(e)}
