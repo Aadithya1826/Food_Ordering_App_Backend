@@ -1738,69 +1738,16 @@ def authorize_order_access_for_cancellation(
     db: Session
 ):
     """
-    Enforce strict cancellation authorization:
-    - Customer must own CUSTOMER_APP order.
-    - Cashier POS orders cannot be cancelled by customer.
-    - Dine-In guests require validated session_uid.
-    - Cross-customer and cross-restaurant cancellations are rejected.
+    Cancellation authorization:
+    - Cross-restaurant check prevents accidental cancellation across different restaurants.
+    - No authentication required for cancelling KOT orders.
     """
     # Cross-restaurant check
     if restaurant_id and order.restaurant_id != restaurant_id:
         raise HTTPException(status_code=403, detail="Cross-restaurant cancellation prohibited")
 
-    # 1. Staff access
-    if caller and caller.get("type") == "STAFF":
-        from ..utils.roles import require_restaurant_access
-        user = caller["user"]
-        require_restaurant_access(user, order.restaurant_id)
-        return
-
-    # 2. Authenticated Customer
-    if caller and caller.get("type") == "CUSTOMER":
-        cust = caller["customer"]
-        # Cashier POS isolation
-        if getattr(order, "order_source", None) == "CASHIER_POS":
-            raise HTTPException(
-                status_code=403,
-                detail="Cancellation unavailable for orders placed directly at the cashier counter."
-            )
-
-        cust_phone = normalize_phone(cust.phone)
-        order_phone = normalize_phone(order.customer_phone) if order.customer_phone else None
-
-        is_owner = False
-        if order_phone and cust_phone and order_phone == cust_phone:
-            is_owner = True
-        elif order.user_id == cust.id:
-            is_owner = True
-        elif order.dine_in_session_id:
-            sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
-            if sess and sess.customer_phone and normalize_phone(sess.customer_phone) == cust_phone:
-                is_owner = True
-
-        if not is_owner:
-            raise HTTPException(
-                status_code=403,
-                detail="Unauthorized: You do not have permission to manage this order"
-            )
-        return
-
-    # 3. Dine-In Guest with validated session_uid
-    if session_uid and order.dine_in_session_id:
-        sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
-        if sess and sess.session_uid == session_uid and sess.restaurant_id == order.restaurant_id:
-            if getattr(order, "order_source", None) == "CASHIER_POS":
-                raise HTTPException(
-                    status_code=403,
-                    detail="Cancellation unavailable for orders placed directly at the cashier counter."
-                )
-            return
-
-    # 4. Unauthorized
-    raise HTTPException(
-        status_code=401,
-        detail="Authentication required to manage or cancel this order"
-    )
+    # No authentication required for cancelling KOT / table orders
+    return
 
 
 def recalculate_order_financials(order: Order, db: Session) -> Decimal:
@@ -1968,29 +1915,11 @@ def cancel_order(
                 "status": "CANCELLED"
             }
 
-        is_staff = caller and caller.get("type") == "STAFF"
-        if not is_staff:
-            # Check if kitchen has already started preparation (HTTP 409)
-            if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED"]:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Cancellation unavailable. The kitchen has already started preparing this order."
-                )
-
-            # Check item-level preparation
-            for oi in order.items:
-                oi_status = (getattr(oi, "status", None) or "PENDING").upper()
-                if oi_status in ["PREPARING", "READY", "SERVED", "COMPLETED"]:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Cancellation unavailable. The kitchen has already started preparing this order."
-                    )
-        else:
-            if curr_status in ["SERVED", "DELIVERED", "COMPLETED"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot cancel an order that has already been served or completed."
-                )
+        if curr_status in ["SERVED", "DELIVERED", "COMPLETED"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot cancel an order that has already been served or completed."
+            )
 
         norm_type = (order.order_type or "").upper().replace(" ", "_")
 
@@ -2099,13 +2028,7 @@ def cancel_order_item(
 
         authorize_order_access_for_cancellation(order, caller, payload.session_uid, restaurant_id, db)
 
-        is_staff = caller and caller.get("type") == "STAFF"
         curr_status = (order.status or "").upper()
-        if not is_staff and curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Cancellation unavailable. The kitchen has already started preparing this order."
-            )
         if curr_status in ["SERVED", "DELIVERED", "COMPLETED"]:
             raise HTTPException(
                 status_code=400,
@@ -2128,11 +2051,6 @@ def cancel_order_item(
             raise HTTPException(status_code=404, detail="Order item not found")
 
         item_status = (getattr(item, "status", None) or "PENDING").upper()
-        if not is_staff and item_status in ["PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Cancellation unavailable. This item has already been prepared or cancelled."
-            )
         if item_status in ["SERVED", "COMPLETED", "CANCELLED"]:
             raise HTTPException(
                 status_code=400,
