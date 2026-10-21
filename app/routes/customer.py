@@ -906,7 +906,7 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
             validated_items.append((db_item.id, qty, price))
 
         # Delivery fee from payload or standard 100 base fee (only for DELIVERY)
-        if backend_order_type == "DELIVERY":
+        if is_delivery:
             delivery_fee = float(payload.delivery_fee) if payload.delivery_fee else 100.0
             if delivery_fee <= 0.0:
                 delivery_fee = 100.0
