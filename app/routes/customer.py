@@ -1968,20 +1968,28 @@ def cancel_order(
                 "status": "CANCELLED"
             }
 
-        # Check if kitchen has already started preparation (HTTP 409)
-        if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Cancellation unavailable. The kitchen has already started preparing this order."
-            )
-
-        # Check item-level preparation
-        for oi in order.items:
-            oi_status = (getattr(oi, "status", None) or "PENDING").upper()
-            if oi_status in ["PREPARING", "READY", "SERVED", "COMPLETED"]:
+        is_staff = caller and caller.get("type") == "STAFF"
+        if not is_staff:
+            # Check if kitchen has already started preparation (HTTP 409)
+            if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED"]:
                 raise HTTPException(
                     status_code=409,
                     detail="Cancellation unavailable. The kitchen has already started preparing this order."
+                )
+
+            # Check item-level preparation
+            for oi in order.items:
+                oi_status = (getattr(oi, "status", None) or "PENDING").upper()
+                if oi_status in ["PREPARING", "READY", "SERVED", "COMPLETED"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cancellation unavailable. The kitchen has already started preparing this order."
+                    )
+        else:
+            if curr_status in ["SERVED", "DELIVERED", "COMPLETED"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot cancel an order that has already been served or completed."
                 )
 
         norm_type = (order.order_type or "").upper().replace(" ", "_")
@@ -2091,26 +2099,44 @@ def cancel_order_item(
 
         authorize_order_access_for_cancellation(order, caller, payload.session_uid, restaurant_id, db)
 
+        is_staff = caller and caller.get("type") == "STAFF"
         curr_status = (order.status or "").upper()
-        if curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"]:
+        if not is_staff and curr_status in ["PREPARING", "READY", "SERVED", "DELIVERED", "COMPLETED", "CANCELLED"]:
             raise HTTPException(
                 status_code=409,
                 detail="Cancellation unavailable. The kitchen has already started preparing this order."
             )
+        if curr_status in ["SERVED", "DELIVERED", "COMPLETED"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot cancel an item from an already served or completed order."
+            )
 
         item = db.query(OrderItem).filter(
-            OrderItem.id == item_id,
-            OrderItem.order_id == order.id
+            (OrderItem.id == item_id) | (OrderItem.menu_item_id == item_id),
+            OrderItem.order_id == order.id,
+            OrderItem.status != "CANCELLED"
         ).with_for_update().first()
+
+        if not item:
+            item = db.query(OrderItem).filter(
+                (OrderItem.id == item_id) | (OrderItem.menu_item_id == item_id),
+                OrderItem.order_id == order.id
+            ).with_for_update().first()
 
         if not item:
             raise HTTPException(status_code=404, detail="Order item not found")
 
         item_status = (getattr(item, "status", None) or "PENDING").upper()
-        if item_status in ["PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED"]:
+        if not is_staff and item_status in ["PREPARING", "READY", "SERVED", "COMPLETED", "CANCELLED"]:
             raise HTTPException(
                 status_code=409,
                 detail="Cancellation unavailable. This item has already been prepared or cancelled."
+            )
+        if item_status in ["SERVED", "COMPLETED", "CANCELLED"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot cancel an item that is already served, completed, or cancelled."
             )
 
         item.status = "CANCELLED"
