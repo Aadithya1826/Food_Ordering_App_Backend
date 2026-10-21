@@ -171,7 +171,7 @@ def waiter_login(data: WaiterLoginRequest, response: Response, db: Session = Dep
 
     restaurant = db.query(Restaurant).filter(Restaurant.id == waiter.restaurant_id).first()
 
-    token = create_token(waiter)
+    token = create_token(waiter, account_type="STAFF")
 
     response.set_cookie(
         key="access_token",
