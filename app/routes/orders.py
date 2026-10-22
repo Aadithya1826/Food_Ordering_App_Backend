@@ -106,6 +106,22 @@ def get_live_orders(
             if placed_by_user:
                 placed_by_name = placed_by_user.name
 
+        # Ensure bill_no is always populated for KOT verification
+        if not o.bill_no:
+            sibling_bill = None
+            if o.dine_in_session_id:
+                sibling_bill = db.query(Order.bill_no).filter(
+                    Order.dine_in_session_id == o.dine_in_session_id,
+                    Order.bill_no.isnot(None)
+                ).first()
+            if sibling_bill and sibling_bill[0]:
+                o.bill_no = sibling_bill[0]
+            else:
+                from sqlalchemy import func
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == o.restaurant_id).scalar() or 0
+                o.bill_no = (max_bill_no or 0) + 1
+            db.commit()
+
         response.append({
             "order_id": o.id,
             "restaurant_id": o.restaurant_id,
@@ -393,6 +409,21 @@ def create_pos_order(
         cust_name_clean = payload.customer_name.strip() if payload.customer_name and payload.customer_name.strip() else None
         cust_phone_clean = payload.customer_phone.strip() if payload.customer_phone and payload.customer_phone.strip() else None
 
+        assigned_bill_no = payload.bill_no
+        if not assigned_bill_no:
+            if dine_in_sess_id:
+                sibling_bill = db.query(Order.bill_no).filter(
+                    Order.dine_in_session_id == dine_in_sess_id,
+                    Order.status != "CANCELLED",
+                    Order.bill_no.isnot(None)
+                ).first()
+                if sibling_bill and sibling_bill[0]:
+                    assigned_bill_no = sibling_bill[0]
+            if not assigned_bill_no:
+                from sqlalchemy import func
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
+                assigned_bill_no = (max_bill_no or 0) + 1
+
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
@@ -404,7 +435,7 @@ def create_pos_order(
             payment_status=payment_status,
             payment_method=payload.payment_method,
             order_type=pos_order_type,
-            bill_no=payload.bill_no,
+            bill_no=assigned_bill_no,
             branch_order_id=next_branch_order_id,
             customer_name=cust_name_clean,
             customer_phone=cust_phone_clean
