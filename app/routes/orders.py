@@ -31,20 +31,17 @@ def get_live_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "WAITER", "CASHIER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
-    # Strictly filter to TODAY's date (midnight IST) - eliminates yesterday's KOTs and old history
-    now_utc = datetime.utcnow()
-    ist_now = now_utc + timedelta(hours=5, minutes=30)
-    today_midnight_ist = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_cutoff = today_midnight_ist - timedelta(hours=5, minutes=30)
-
-    # Filter live shift orders: only TODAY's active orders
+    cutoff = datetime.utcnow() - timedelta(hours=12)
+    # Strictly isolate DINE_IN:
+    # Takeaway and Delivery are filtered when status == 'SERVED' (unchanged).
+    # Active unpaid DINE_IN orders remain visible if they are not SERVED OR if they have newly appended pending kitchen items.
     query = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(
         Order.status != "CANCELLED",
-        Order.created_at >= today_cutoff,
         or_(
             Order.status != "SERVED",
+            Order.created_at >= cutoff,
             (
                 (Order.order_type == "DINE_IN") &
                 (Order.payment_status != "Paid") &
@@ -57,26 +54,6 @@ def get_live_orders(
 
     orders = query.all()
     table_number_map = build_table_number_map(db, orders)
-
-    # Batch lookup customers and users in 2 queries to eliminate N+1 performance bottleneck
-    phones = {o.customer_phone for o in orders if not getattr(o, 'customer_name', None) and o.customer_phone}
-    user_ids = {o.user_id for o in orders if o.user_id}
-
-    customer_map = {}
-    if phones:
-        from ..models.customer import Customer
-        cust_list = db.query(Customer.phone, Customer.name).filter(Customer.phone.in_(phones)).all()
-        customer_map = {c[0]: c[1] for c in cust_list if c[1]}
-
-    user_map = {}
-    if user_ids:
-        from ..models.user import User
-        user_list = db.query(User.id, User.name).filter(User.id.in_(user_ids)).all()
-        user_map = {u[0]: u[1] for u in user_list if u[1]}
-
-    needs_commit = False
-    max_bill_no = None
-
     response = []
     for o in orders:
         items = [
@@ -98,10 +75,13 @@ def get_live_orders(
         # Resolve customer name and phone
         customer_name = getattr(o, 'customer_name', None)
         customer_phone = getattr(o, 'customer_phone', None) or o.customer_phone or ""
-        if not customer_name and customer_phone:
-            customer_name = customer_map.get(customer_phone)
+        if not customer_name and o.customer_phone:
+            from ..models.customer import Customer
+            cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
+            if cust and cust.name:
+                customer_name = cust.name
         if not customer_name:
-            customer_name = customer_phone or "Guest"
+            customer_name = o.customer_phone or "Guest"
 
         # Fallback to delivery_address_snapshot
         if (not customer_name or customer_name in ["Guest", customer_phone]) and o.delivery_address_snapshot:
@@ -118,8 +98,13 @@ def get_live_orders(
                 pass
 
         # Resolve placed_by (cashier/waiter who created the order)
-        placed_by_name = user_map.get(o.user_id) if o.user_id else None
+        placed_by_name = None
         placed_by_user_id = o.user_id
+        if o.user_id:
+            from ..models.user import User
+            placed_by_user = db.query(User).filter(User.id == o.user_id).first()
+            if placed_by_user:
+                placed_by_name = placed_by_user.name
 
         # Ensure bill_no is always populated for KOT verification
         if not o.bill_no:
@@ -133,17 +118,9 @@ def get_live_orders(
                 o.bill_no = sibling_bill[0]
             else:
                 from sqlalchemy import func
-                if max_bill_no is None:
-                    max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == o.restaurant_id).scalar() or 0
-                max_bill_no += 1
-                o.bill_no = max_bill_no
-            needs_commit = True
-
-    if needs_commit:
-        try:
+                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == o.restaurant_id).scalar() or 0
+                o.bill_no = (max_bill_no or 0) + 1
             db.commit()
-        except Exception:
-            db.rollback()
 
         response.append({
             "order_id": o.id,
