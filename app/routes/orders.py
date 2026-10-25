@@ -31,13 +31,18 @@ def get_live_orders(
     require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "WAITER", "CASHIER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
-    cutoff = datetime.utcnow() - timedelta(hours=18)
-    # Filter live shift orders: active orders from today / current shift
+    # Strictly filter to TODAY's date (midnight IST) - eliminates yesterday's KOTs and old history
+    now_utc = datetime.utcnow()
+    ist_now = now_utc + timedelta(hours=5, minutes=30)
+    today_midnight_ist = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_cutoff = today_midnight_ist - timedelta(hours=5, minutes=30)
+
+    # Filter live shift orders: only TODAY's active orders
     query = db.query(Order).options(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(
         Order.status != "CANCELLED",
-        Order.created_at >= cutoff,
+        Order.created_at >= today_cutoff,
         or_(
             Order.status != "SERVED",
             (
