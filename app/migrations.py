@@ -56,13 +56,30 @@ def create_tables():
                 ("packaging_fee", "FLOAT"),
                 ("gst_amount", "FLOAT"),
                 ("tip_amount", "FLOAT"),
-                ("order_type", "VARCHAR DEFAULT 'DINE_IN'")
+                ("order_type", "VARCHAR DEFAULT 'DINE_IN'"),
+                ("idempotency_key", "VARCHAR(255)"),
+                ("client_order_id", "VARCHAR(255)")
             ]
             for col, dtype in new_order_cols:
                 try:
                     conn.execute(text(f"ALTER TABLE orders ADD COLUMN {col} {dtype};"))
                 except Exception as e:
                     pass # column already exists
+
+            try:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_idempotency_key "
+                    "ON orders (idempotency_key) WHERE idempotency_key IS NOT NULL;"
+                ))
+            except Exception:
+                pass
+            try:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_client_order_id "
+                    "ON orders (client_order_id) WHERE client_order_id IS NOT NULL;"
+                ))
+            except Exception:
+                pass
                     
             try:
                 conn.execute(text("ALTER TABLE delivery_partners ADD COLUMN total_rides INTEGER DEFAULT 0;"))

@@ -47,6 +47,10 @@ class Order(Base):
     dine_in_session_id = Column(Integer, ForeignKey("dine_in_sessions.id"), nullable=True, index=True)
     order_source = Column(String(32), default="CUSTOMER_APP", nullable=True)
 
+    # Idempotency & Offline Outage Sync Tracking
+    idempotency_key = Column(String(255), unique=True, index=True, nullable=True)
+    client_order_id = Column(String(255), unique=True, index=True, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

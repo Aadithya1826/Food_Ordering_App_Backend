@@ -1,10 +1,13 @@
 # pyrefly: ignore [missing-import]
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 # pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session, joinedload
 # pyrefly: ignore [missing-import]
-from sqlalchemy import or_
-from datetime import datetime, timedelta
+from sqlalchemy import or_, func
+from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Any, Union
+from pydantic import BaseModel
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..schemas.order import OrderStatusUpdate, OrderPaymentStatusUpdate
@@ -150,6 +153,8 @@ def get_live_orders(
             "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
             "placed_by_user_id": placed_by_user_id,
             "placed_by_name": placed_by_name,
+            "client_order_id": getattr(o, "client_order_id", None),
+            "idempotency_key": getattr(o, "idempotency_key", None),
         })
 
     if has_db_changes:
@@ -331,35 +336,92 @@ def get_all_orders(
             "delivery_address": o.delivery_address_snapshot,
             "dine_in_session_id": o.dine_in_session_id,
             "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
+            "client_order_id": getattr(o, "client_order_id", None),
+            "idempotency_key": getattr(o, "idempotency_key", None),
         })
 
     return response
-# pyrefly: ignore [missing-import]
-from pydantic import BaseModel
-from typing import List, Optional
-
 class PosCartItem(BaseModel):
+    model_config = {"extra": "ignore"}
     id: int
     quantity: int
     price: float
 
 class PosOrderPayload(BaseModel):
+    model_config = {"extra": "ignore"}
     table_number: str = "takeaway"
     order_type: Optional[str] = "DINE_IN"
     payment_method: str = "Cash"
     cart: List[PosCartItem] = []
     total_amount: float = 0
     bill_no: Optional[int] = None
-    timestamp: Optional[str] = None
+    timestamp: Optional[Any] = None
+    original_timestamp: Optional[Any] = None
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
+    client_order_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+def parse_business_timestamp(raw_val: Any) -> Optional[datetime]:
+    """Parse business timestamp from ISO string, epoch ms, epoch s, or common date formats into UTC datetime."""
+    if not raw_val:
+        return None
+    if isinstance(raw_val, datetime):
+        if raw_val.tzinfo is not None:
+            return raw_val.astimezone(timezone.utc).replace(tzinfo=None)
+        return raw_val
+    if isinstance(raw_val, (int, float)):
+        try:
+            # Epoch milliseconds if > 1e11, otherwise epoch seconds
+            if raw_val > 1e11:
+                return datetime.fromtimestamp(raw_val / 1000.0, tz=timezone.utc).replace(tzinfo=None)
+            return datetime.fromtimestamp(raw_val, tz=timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
+    if isinstance(raw_val, str):
+        val = raw_val.strip()
+        if not val:
+            return None
+        # Try numeric string (epoch ms or s)
+        try:
+            num = float(val)
+            if num > 1e11:
+                return datetime.fromtimestamp(num / 1000.0, tz=timezone.utc).replace(tzinfo=None)
+            return datetime.fromtimestamp(num, tz=timezone.utc).replace(tzinfo=None)
+        except ValueError:
+            pass
+        # Try ISO 8601 format
+        try:
+            ts = val.replace('Z', '+00:00')
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is not None:
+                return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+        except Exception:
+            pass
+        # Try common datetime formats
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d"
+        ):
+            try:
+                return datetime.strptime(val, fmt)
+            except Exception:
+                continue
+    return None
 
 from ..models.table import Table
 
 @router.post("/api/v1/orders", response_model=dict)
 def create_pos_order(
     payload: PosOrderPayload,
+    request: Request,
     restaurant_id: int | None = None,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    x_original_timestamp: Optional[str] = Header(None, alias="X-Original-Timestamp"),
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -368,6 +430,79 @@ def create_pos_order(
         res_id = resolve_restaurant_id(user, restaurant_id)
         if not res_id:
             raise HTTPException(status_code=400, detail="restaurant_id is required")
+
+        # 1. Resolve Idempotency Keys (Header has priority, fallback to payload body)
+        keys_to_check = set()
+        if idempotency_key and str(idempotency_key).strip():
+            keys_to_check.add(str(idempotency_key).strip())
+        if request:
+            for h in ("Idempotency-Key", "idempotency-key", "idempotency_key"):
+                h_val = request.headers.get(h)
+                if h_val and h_val.strip():
+                    keys_to_check.add(h_val.strip())
+        if payload.client_order_id and str(payload.client_order_id).strip():
+            keys_to_check.add(str(payload.client_order_id).strip())
+        if payload.idempotency_key and str(payload.idempotency_key).strip():
+            keys_to_check.add(str(payload.idempotency_key).strip())
+
+        primary_idempotency_key = None
+        if idempotency_key and str(idempotency_key).strip():
+            primary_idempotency_key = str(idempotency_key).strip()
+        elif payload.client_order_id and str(payload.client_order_id).strip():
+            primary_idempotency_key = str(payload.client_order_id).strip()
+        elif keys_to_check:
+            primary_idempotency_key = next(iter(keys_to_check))
+
+        # 2. Check if key already exists (Idempotency Guarantee)
+        # If exists, return existing order with 200 — do not create a second row or duplicate items.
+        if keys_to_check:
+            existing_order = db.query(Order).options(
+                joinedload(Order.items)
+            ).filter(
+                or_(
+                    Order.idempotency_key.in_(keys_to_check),
+                    Order.client_order_id.in_(keys_to_check)
+                )
+            ).first()
+
+            if existing_order:
+                table_number = None
+                if existing_order.table_id:
+                    t = db.query(Table).filter(Table.id == existing_order.table_id).first()
+                    if t:
+                        table_number = t.table_number
+
+                return {
+                    "orderId": existing_order.id,
+                    "id": existing_order.id,
+                    "branch_order_id": existing_order.branch_order_id,
+                    "bill_no": existing_order.bill_no,
+                    "status": existing_order.status,
+                    "payment_status": existing_order.payment_status,
+                    "payment_method": existing_order.payment_method,
+                    "order_type": existing_order.order_type,
+                    "total_amount": existing_order.total_amount,
+                    "table_number": table_number,
+                    "created_at": existing_order.created_at.isoformat() if existing_order.created_at else None,
+                    "idempotency_key": existing_order.idempotency_key or primary_idempotency_key,
+                    "client_order_id": existing_order.client_order_id or primary_idempotency_key,
+                    "message": "Order already processed (idempotent replay)",
+                    "idempotent": True,
+                    "is_duplicate": True
+                }
+
+        # 3. Resolve business timestamp (X-Original-Timestamp or body timestamp)
+        # Ensures bills entered during an outage land on the correct date in reports instead of sync time.
+        raw_timestamp = (
+            x_original_timestamp or
+            (request.headers.get("X-Original-Timestamp") if request else None) or
+            (request.headers.get("x-original-timestamp") if request else None) or
+            (request.headers.get("X-Timestamp") if request else None) or
+            (request.headers.get("x-timestamp") if request else None) or
+            payload.timestamp or
+            payload.original_timestamp
+        )
+        business_time = parse_business_timestamp(raw_timestamp)
 
         is_takeaway = (
             not payload.table_number or 
@@ -428,7 +563,6 @@ def create_pos_order(
                 if sibling_bill and sibling_bill[0]:
                     assigned_bill_no = sibling_bill[0]
             if not assigned_bill_no:
-                from sqlalchemy import func
                 max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
                 assigned_bill_no = (max_bill_no or 0) + 1
 
@@ -446,20 +580,53 @@ def create_pos_order(
             bill_no=assigned_bill_no,
             branch_order_id=next_branch_order_id,
             customer_name=cust_name_clean,
-            customer_phone=cust_phone_clean
+            customer_phone=cust_phone_clean,
+            idempotency_key=primary_idempotency_key,
+            client_order_id=payload.client_order_id or primary_idempotency_key,
+            created_at=business_time if business_time else datetime.utcnow()
         )
         
-        if payload.timestamp:
-            try:
-                ts = payload.timestamp.replace('Z', '+00:00')
-                dt = datetime.fromisoformat(ts)
-                new_order.created_at = dt.replace(tzinfo=None)
-            except Exception:
-                pass
-                
-        db.add(new_order)
-        db.commit()
-        db.refresh(new_order)
+        try:
+            db.add(new_order)
+            db.commit()
+            db.refresh(new_order)
+        except IntegrityError as ie:
+            db.rollback()
+            # Handle concurrent race condition where two identical idempotency requests arrived simultaneously
+            if keys_to_check:
+                existing_order = db.query(Order).options(
+                    joinedload(Order.items)
+                ).filter(
+                    or_(
+                        Order.idempotency_key.in_(keys_to_check),
+                        Order.client_order_id.in_(keys_to_check)
+                    )
+                ).first()
+                if existing_order:
+                    table_number = None
+                    if existing_order.table_id:
+                        t = db.query(Table).filter(Table.id == existing_order.table_id).first()
+                        if t:
+                            table_number = t.table_number
+                    return {
+                        "orderId": existing_order.id,
+                        "id": existing_order.id,
+                        "branch_order_id": existing_order.branch_order_id,
+                        "bill_no": existing_order.bill_no,
+                        "status": existing_order.status,
+                        "payment_status": existing_order.payment_status,
+                        "payment_method": existing_order.payment_method,
+                        "order_type": existing_order.order_type,
+                        "total_amount": existing_order.total_amount,
+                        "table_number": table_number,
+                        "created_at": existing_order.created_at.isoformat() if existing_order.created_at else None,
+                        "idempotency_key": existing_order.idempotency_key or primary_idempotency_key,
+                        "client_order_id": existing_order.client_order_id or primary_idempotency_key,
+                        "message": "Order already processed (idempotent replay)",
+                        "idempotent": True,
+                        "is_duplicate": True
+                    }
+            raise ie
 
         if cust_phone_clean:
             try:
@@ -485,7 +652,18 @@ def create_pos_order(
             db.add(order_item)
         db.commit()
 
-        return {"orderId": new_order.id, "branch_order_id": new_order.branch_order_id, "bill_no": new_order.bill_no, "message": "Order created successfully"}
+        return {
+            "orderId": new_order.id,
+            "id": new_order.id,
+            "branch_order_id": new_order.branch_order_id,
+            "bill_no": new_order.bill_no,
+            "status": new_order.status,
+            "total_amount": new_order.total_amount,
+            "created_at": new_order.created_at.isoformat() if new_order.created_at else None,
+            "idempotency_key": new_order.idempotency_key,
+            "client_order_id": new_order.client_order_id,
+            "message": "Order created successfully"
+        }
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}

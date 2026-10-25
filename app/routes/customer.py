@@ -556,6 +556,10 @@ class CustomerOrderPayload(BaseModel):
     packaging_fee: Optional[float] = None
     tip_amount: Optional[float] = None
     total_amount: float = 0
+    client_order_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    timestamp: Optional[Any] = None
+    original_timestamp: Optional[Any] = None
     
 class RazorpayOrderPayload(BaseModel):
     order_id: int
@@ -631,6 +635,54 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
                         restaurant_id = restaurant.id
             if not restaurant:
                 raise HTTPException(status_code=404, detail="Restaurant not found")
+
+        # 1. Resolve Idempotency Keys (Header has priority, fallback to payload body)
+        keys_to_check = set()
+        if request:
+            for h in ("Idempotency-Key", "idempotency-key", "idempotency_key"):
+                h_val = request.headers.get(h)
+                if h_val and h_val.strip():
+                    keys_to_check.add(h_val.strip())
+        if payload.client_order_id and str(payload.client_order_id).strip():
+            keys_to_check.add(str(payload.client_order_id).strip())
+        if payload.idempotency_key and str(payload.idempotency_key).strip():
+            keys_to_check.add(str(payload.idempotency_key).strip())
+
+        primary_idempotency_key = None
+        if request and request.headers.get("Idempotency-Key"):
+            primary_idempotency_key = request.headers.get("Idempotency-Key").strip()
+        elif payload.client_order_id and str(payload.client_order_id).strip():
+            primary_idempotency_key = str(payload.client_order_id).strip()
+        elif keys_to_check:
+            primary_idempotency_key = next(iter(keys_to_check))
+
+        # Check if key already exists (Idempotency Guarantee)
+        if keys_to_check:
+            existing_order = db.query(Order).options(joinedload(Order.items)).filter(
+                or_(
+                    Order.idempotency_key.in_(keys_to_check),
+                    Order.client_order_id.in_(keys_to_check)
+                )
+            ).first()
+            if existing_order:
+                return {
+                    "success": True,
+                    "orderId": f"ORD-{str(existing_order.id).zfill(6)}",
+                    "dbOrderId": existing_order.id,
+                    "bill_no": existing_order.bill_no,
+                    "billNo": existing_order.bill_no,
+                    "sessionId": existing_order.dine_in_session_id,
+                    "sessionUid": None,
+                    "totalAmount": existing_order.total_amount,
+                    "sessionTotalAmount": existing_order.total_amount,
+                    "message": "Order already placed (idempotent replay)",
+                    "isAppended": False,
+                    "delivery_address": existing_order.delivery_address_snapshot,
+                    "idempotent": True,
+                    "is_duplicate": True,
+                    "idempotency_key": existing_order.idempotency_key or primary_idempotency_key,
+                    "client_order_id": existing_order.client_order_id or primary_idempotency_key
+                }
 
         # Resolve customer phone from authenticated token or payload
         cust_phone = (payload.phone or "").strip()
@@ -999,6 +1051,17 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
             max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
             session_bill_no = (max_bill_no or 0) + 1
 
+        from .orders import parse_business_timestamp
+        raw_cust_ts = (
+            (request.headers.get("X-Original-Timestamp") if request else None) or
+            (request.headers.get("x-original-timestamp") if request else None) or
+            (request.headers.get("X-Timestamp") if request else None) or
+            (request.headers.get("x-timestamp") if request else None) or
+            payload.timestamp or
+            payload.original_timestamp
+        )
+        business_cust_time = parse_business_timestamp(raw_cust_ts)
+
         new_order = Order(
             restaurant_id=restaurant_id,
             table_id=table_id,
@@ -1020,10 +1083,44 @@ def place_order(payload: CustomerOrderPayload, restaurant_id: int, request: Requ
             customer_phone=cust_phone if cust_phone else (payload.phone.strip() if payload.phone else None),
             discount_amount=discount_amount,
             discount_code=payload.discount_code,
+            idempotency_key=primary_idempotency_key,
+            client_order_id=payload.client_order_id or primary_idempotency_key,
+            created_at=business_cust_time if business_cust_time else datetime.utcnow()
         )
-        db.add(new_order)
-        db.flush()
-        db.refresh(new_order)
+        try:
+            db.add(new_order)
+            db.flush()
+            db.refresh(new_order)
+        except Exception as _insert_err:
+            from sqlalchemy.exc import IntegrityError
+            if isinstance(_insert_err, IntegrityError) and keys_to_check:
+                db.rollback()
+                existing_order = db.query(Order).options(joinedload(Order.items)).filter(
+                    or_(
+                        Order.idempotency_key.in_(keys_to_check),
+                        Order.client_order_id.in_(keys_to_check)
+                    )
+                ).first()
+                if existing_order:
+                    return {
+                        "success": True,
+                        "orderId": f"ORD-{str(existing_order.id).zfill(6)}",
+                        "dbOrderId": existing_order.id,
+                        "bill_no": existing_order.bill_no,
+                        "billNo": existing_order.bill_no,
+                        "sessionId": existing_order.dine_in_session_id,
+                        "sessionUid": None,
+                        "totalAmount": existing_order.total_amount,
+                        "sessionTotalAmount": existing_order.total_amount,
+                        "message": "Order already placed (idempotent replay)",
+                        "isAppended": False,
+                        "delivery_address": existing_order.delivery_address_snapshot,
+                        "idempotent": True,
+                        "is_duplicate": True,
+                        "idempotency_key": existing_order.idempotency_key or primary_idempotency_key,
+                        "client_order_id": existing_order.client_order_id or primary_idempotency_key
+                    }
+            raise _insert_err
 
         if session_bill_no and session_obj:
             db.query(Order).filter(
