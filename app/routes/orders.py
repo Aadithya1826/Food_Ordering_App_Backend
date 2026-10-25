@@ -39,9 +39,9 @@ def get_live_orders(
         joinedload(Order.items).joinedload(OrderItem.menu_item)
     ).filter(
         Order.status != "CANCELLED",
+        Order.created_at >= cutoff,
         or_(
             Order.status != "SERVED",
-            Order.created_at >= cutoff,
             (
                 (Order.order_type == "DINE_IN") &
                 (Order.payment_status != "Paid") &
@@ -52,9 +52,35 @@ def get_live_orders(
     if restaurant_id is not None:
         query = query.filter(Order.restaurant_id == restaurant_id)
 
-    orders = query.all()
+    orders = query.order_by(Order.id.desc()).limit(100).all()
     table_number_map = build_table_number_map(db, orders)
     response = []
+
+
+    # Batch pre-fetch customers and users to eliminate N+1 query latency
+    phones = [o.customer_phone for o in orders if o.customer_phone and not getattr(o, 'customer_name', None)]
+    customer_map = {}
+    if phones:
+        from ..models.customer import Customer
+        cust_records = db.query(Customer).filter(Customer.phone.in_(set(phones))).all()
+        customer_map = {c.phone: c.name for c in cust_records if c.name}
+
+    user_ids = [o.user_id for o in orders if o.user_id]
+    user_map = {}
+    if user_ids:
+        from ..models.user import User
+        users = db.query(User).filter(User.id.in_(set(user_ids))).all()
+        user_map = {u.id: u.name for u in users}
+
+    # Pre-calculate max bill number once if needed
+    needs_bill_no = any(not o.bill_no for o in orders)
+    current_max_bill = 0
+    if needs_bill_no:
+        from sqlalchemy import func
+        current_max_bill = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
+
+    has_db_changes = False
+
     for o in orders:
         items = [
             {
@@ -75,11 +101,8 @@ def get_live_orders(
         # Resolve customer name and phone
         customer_name = getattr(o, 'customer_name', None)
         customer_phone = getattr(o, 'customer_phone', None) or o.customer_phone or ""
-        if not customer_name and o.customer_phone:
-            from ..models.customer import Customer
-            cust = db.query(Customer).filter(Customer.phone == o.customer_phone).first()
-            if cust and cust.name:
-                customer_name = cust.name
+        if not customer_name and customer_phone:
+            customer_name = customer_map.get(customer_phone)
         if not customer_name:
             customer_name = o.customer_phone or "Guest"
 
@@ -98,29 +121,14 @@ def get_live_orders(
                 pass
 
         # Resolve placed_by (cashier/waiter who created the order)
-        placed_by_name = None
+        placed_by_name = user_map.get(o.user_id) if o.user_id else None
         placed_by_user_id = o.user_id
-        if o.user_id:
-            from ..models.user import User
-            placed_by_user = db.query(User).filter(User.id == o.user_id).first()
-            if placed_by_user:
-                placed_by_name = placed_by_user.name
 
         # Ensure bill_no is always populated for KOT verification
         if not o.bill_no:
-            sibling_bill = None
-            if o.dine_in_session_id:
-                sibling_bill = db.query(Order.bill_no).filter(
-                    Order.dine_in_session_id == o.dine_in_session_id,
-                    Order.bill_no.isnot(None)
-                ).first()
-            if sibling_bill and sibling_bill[0]:
-                o.bill_no = sibling_bill[0]
-            else:
-                from sqlalchemy import func
-                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == o.restaurant_id).scalar() or 0
-                o.bill_no = (max_bill_no or 0) + 1
-            db.commit()
+            current_max_bill += 1
+            o.bill_no = current_max_bill
+            has_db_changes = True
 
         response.append({
             "order_id": o.id,
@@ -143,6 +151,9 @@ def get_live_orders(
             "placed_by_user_id": placed_by_user_id,
             "placed_by_name": placed_by_name,
         })
+
+    if has_db_changes:
+        db.commit()
 
     return response
 
@@ -380,11 +391,8 @@ def create_pos_order(
                 db.refresh(table)
             table_id = table.id
 
-        # Takeaway orders show in Live Orders (KDS) under "New Orders" as PENDING so kitchen can prepare them
-        if is_takeaway or (payload.order_type and payload.order_type.upper() == "TAKEAWAY"):
-            status = "PENDING"
-        else:
-            status = "SERVED" if payload.payment_method.lower() in ["cash", "upi", "card"] else "PENDING"
+        # All newly placed POS orders must enter KDS under "New Orders" as PENDING so kitchen prepares them
+        status = "PENDING"
         payment_status = "Paid" if payload.payment_method.lower() in ["cash", "upi", "card"] else "Pending"
 
         # Calculate continuous branch_order_id

@@ -7,6 +7,9 @@ class LoginRequest(BaseModel):
     password: str
     role: Optional[str] = None
 
+class KDSTerminalLoginRequest(BaseModel):
+    restaurant_id: int
+
 class SignupRequest(BaseModel):
     name: str
     email: str

@@ -4,7 +4,7 @@ from ..db import SessionLocal
 from ..models.user import User
 from ..models.restaurant import Restaurant
 from ..utils.auth import verify_password, create_token, hash_password
-from ..schemas import LoginRequest, LoginResponse, UserResponse, SignupRequest, ManagerUpdate
+from ..schemas import LoginRequest, LoginResponse, UserResponse, SignupRequest, ManagerUpdate, KDSTerminalLoginRequest
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role
 
@@ -72,6 +72,70 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
             "name": user.name,
             "role": user.role,
             "restaurant_id": user.restaurant_id
+        }
+    }
+
+
+@router.post("/api/v1/auth/kds-terminal-login")
+def kds_terminal_login(data: KDSTerminalLoginRequest, response: Response, db: Session = Depends(get_db)):
+    """
+    Connect a kitchen display directly by selecting a hotel.
+    No credentials required — issues an active terminal session for the kitchen staff.
+    """
+    restaurant = db.query(Restaurant).filter(Restaurant.id == data.restaurant_id).first()
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    # Find the HOTEL_ADMIN or staff for this restaurant
+    user = db.query(User).filter(
+        User.restaurant_id == restaurant.id,
+        User.role == "HOTEL_ADMIN",
+        User.is_active == True
+    ).first()
+
+    if not user:
+        user = db.query(User).filter(
+            User.restaurant_id == restaurant.id,
+            User.is_active == True
+        ).first()
+
+    if not user:
+        # Create a dedicated terminal user for this restaurant
+        user = User(
+            name=f"{restaurant.name} Kitchen",
+            email=f"kds_terminal_{restaurant.id}@udipi.local",
+            password_hash=hash_password("kds_terminal_secure_key"),
+            role="HOTEL_ADMIN",
+            restaurant_id=restaurant.id,
+            is_active=True
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # Issue a long-lived 365-day KDS terminal token so kitchen displays never expire
+    from datetime import timedelta
+    token = create_token(user, expires_delta=timedelta(days=365))
+
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        max_age=31536000,
+        expires=31536000,
+        secure=False,
+        samesite="lax"
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "name": f"{restaurant.name} Kitchen Display",
+            "role": "HOTEL_ADMIN",
+            "restaurant_id": restaurant.id,
+            "restaurant_name": restaurant.name
         }
     }
 

@@ -84,9 +84,10 @@ def create_rider_token(rider_id: int):
     }
 
 
-def create_token(user, account_type: str = "USER"):
+def create_token(user, account_type: str = "USER", expires_delta: timedelta = None):
     now = datetime.utcnow()
-    expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    if not expires_delta:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     expire = now + expires_delta
     jti = str(uuid.uuid4())
 
