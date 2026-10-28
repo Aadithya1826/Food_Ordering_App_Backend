@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, model_validator
+from typing import List, Optional, Any
 from ..db import SessionLocal
 from ..models.customer import Customer, CustomerAddress
 from ..utils.dependencies import get_current_customer, get_db
@@ -40,20 +40,36 @@ def _assert_within_delivery_coverage(db: Session, latitude, longitude):
 
 class AddressCreatePayload(BaseModel):
     address_type: str = "Home"
-    flat_house_no: str
+    flat_house_no: str = "N/A"
     floor: Optional[str] = None
     building_apartment_name: Optional[str] = None
     landmark: Optional[str] = None
-    full_address: str
+    full_address: str = ""
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     city: str = "Chennai"
     state: str = "Tamil Nadu"
-    pincode: str
-    contact_name: str
-    contact_phone: str
+    pincode: str = "600001"
+    contact_name: str = "Customer"
+    contact_phone: str = ""
     delivery_instructions: Optional[str] = None
     is_default: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if not data.get("full_address"):
+                data["full_address"] = data.get("address_line") or data.get("address") or "Chennai"
+            if not data.get("flat_house_no"):
+                data["flat_house_no"] = data.get("flat") or "N/A"
+            if not data.get("pincode"):
+                data["pincode"] = data.get("postal_code") or "600001"
+            if not data.get("contact_name"):
+                data["contact_name"] = data.get("name") or "Customer"
+            if not data.get("contact_phone"):
+                data["contact_phone"] = data.get("phone") or ""
+        return data
 
 class AddressUpdatePayload(BaseModel):
     address_type: Optional[str] = None

@@ -43,17 +43,31 @@ client = GeminiClient()
 # ─── Schema for tool-data endpoint ───────────────────────────────────────────────
 
 # pyrefly: ignore [missing-import]
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class MobileAgentToolRequest(BaseModel):
     """Schema for the Vapi tool data-fetch endpoint."""
-    tool_name: str
+    tool_name: Optional[str] = None
+    name: Optional[str] = None
     arguments: Dict[str, Any] = {}
+    parameters: Optional[Dict[str, Any]] = None
     # Customer identity — used for ownership validation
     customer_id: Optional[int] = None
     phone: Optional[str] = None
     restaurant_id: Optional[int] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            t_name = data.get("tool_name") or data.get("name")
+            if t_name:
+                data["tool_name"] = t_name
+            args = data.get("arguments") if data.get("arguments") is not None else data.get("parameters")
+            if args is not None:
+                data["arguments"] = args
+        return data
 
 
 # ─── Ownership helper ─────────────────────────────────────────────────────────────
