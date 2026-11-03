@@ -124,8 +124,7 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
                 earned_amount = round(distance_km * RATE_PER_KM, 2)
                 if hasattr(assignment, "earnings"):
                     assignment.earnings = earned_amount
-                if hasattr(order, "delivery_fee"):
-                    order.delivery_fee = earned_amount
+                # Customer delivery fee is 0.0 Rs (Free delivery). Never overwrite customer order delivery_fee.
             # ── Loyalty auto-credit (backend-only, idempotent) ──────────────────
             try:
                 from ..models.customer import Customer, LoyaltyTransaction

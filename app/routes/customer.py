@@ -615,14 +615,49 @@ class SettleDineInSessionPayload(BaseModel):
     amount_paid: Optional[float] = None
 
 @router.get("/api/categories")
-def get_categories(restaurant_id: int = 1, db: Session = Depends(get_db)):
-    categories = db.query(MenuCategory).filter(MenuCategory.restaurant_id == restaurant_id).order_by(MenuCategory.id.asc()).all()
-    return categories
+def get_categories(
+    restaurant_id: int = 1, 
+    order_type: Optional[str] = None, 
+    ac_type: Optional[str] = None, 
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuCategory).filter(MenuCategory.restaurant_id == restaurant_id)
+    req_order_type = (order_type or "").strip().lower()
+    req_ac_type = (ac_type or "").strip().lower()
+    if req_order_type in ["delivery", "deliv"] or req_ac_type in ["ac", "a/c", "both"]:
+        ac_item_category_ids = db.query(MenuItem.category_id).filter(
+            MenuItem.is_deleted == False,
+            MenuItem.restaurant_id == restaurant_id,
+            or_(
+                MenuItem.ac_type.ilike("%both%"),
+                MenuItem.ac_type.ilike("%a/c%"),
+                MenuItem.ac_type.ilike("%ac%"),
+            ),
+            ~MenuItem.ac_type.ilike("%non%")
+        ).distinct()
+        query = query.filter(MenuCategory.id.in_(ac_item_category_ids))
+    return query.order_by(MenuCategory.id.asc()).all()
 
 @router.get("/api/items")
-def get_items(restaurant_id: int = 1, db: Session = Depends(get_db)):
-    items = db.query(MenuItem).filter(MenuItem.restaurant_id == restaurant_id, MenuItem.is_available == True).order_by(MenuItem.category_id.asc(), MenuItem.id.asc()).all()
-    return items
+def get_items(
+    restaurant_id: int = 1, 
+    order_type: Optional[str] = None, 
+    ac_type: Optional[str] = None, 
+    db: Session = Depends(get_db)
+):
+    query = db.query(MenuItem).filter(MenuItem.restaurant_id == restaurant_id, MenuItem.is_available == True, MenuItem.is_deleted == False)
+    req_order_type = (order_type or "").strip().lower()
+    req_ac_type = (ac_type or "").strip().lower()
+    if req_order_type in ["delivery", "deliv"] or req_ac_type in ["ac", "a/c", "both"]:
+        query = query.filter(
+            or_(
+                MenuItem.ac_type.ilike("%both%"),
+                MenuItem.ac_type.ilike("%a/c%"),
+                MenuItem.ac_type.ilike("%ac%"),
+            ),
+            ~MenuItem.ac_type.ilike("%non%")
+        )
+    return query.order_by(MenuItem.category_id.asc(), MenuItem.id.asc()).all()
 
 @router.get("/api/items/category/{category_id}")
 def get_items_by_category(category_id: int, restaurant_id: int = 1, db: Session = Depends(get_db)):
@@ -995,14 +1030,10 @@ def place_order(
             calculated_subtotal += price * qty
             validated_items.append((db_item.id, qty, price))
 
-        # Delivery fee from payload or standard 100 base fee
-        backend_order_type = (payload.order_type or ("DELIVERY" if is_delivery else ("DINE_IN" if is_dine_in else "TAKEAWAY"))).upper()
-        if is_delivery or backend_order_type == "DELIVERY":
-            delivery_fee = float(payload.delivery_fee) if payload.delivery_fee else 100.0
-            if delivery_fee <= 0.0:
-                delivery_fee = 100.0
-        else:
-            delivery_fee = 0.0
+
+        # Delivery fee is Rs. 0 (Free Delivery)
+        delivery_fee = 0.0
+
         packaging_fee = float(payload.packaging_fee) if payload.packaging_fee else 0.0
         tip_amount = float(payload.tip_amount) if payload.tip_amount else 0.0
         discount_amount = float(payload.discount_amount) if payload.discount_amount else 0.0
@@ -1074,6 +1105,7 @@ def place_order(
                 db.flush()
                 db.refresh(session_obj)
 
+        # Shared bill number for Dine-In sessions: all order rounds under the same session share the same bill_no
         session_bill_no = None
         if is_dine_in_req and session_obj:
             existing_sibling_bill = db.query(Order.bill_no).filter(
@@ -1083,10 +1115,9 @@ def place_order(
             ).first()
             if existing_sibling_bill and existing_sibling_bill[0]:
                 session_bill_no = existing_sibling_bill[0]
-            else:
-                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
-                session_bill_no = (max_bill_no or 0) + 1
-        else:
+
+        if not session_bill_no:
+            db.query(Restaurant.id).filter(Restaurant.id == restaurant_id).with_for_update().first()
             max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
             session_bill_no = (max_bill_no or 0) + 1
 
@@ -1112,7 +1143,7 @@ def place_order(
             status=status,
             payment_status=payment_status,
             payment_method=clean_payment_method,
-            order_type=payload.order_type if payload.order_type else "DINE_IN",
+            order_type="DELIVERY" if is_delivery else (payload.order_type if payload.order_type else "DINE_IN"),
             delivery_address_id=valid_delivery_address_id,
             delivery_address_snapshot=delivery_snapshot,
             delivery_instructions=payload.delivery_instructions,
@@ -1196,25 +1227,29 @@ def place_order(
                 assigned_at=datetime.utcnow()
             )
             db.add(unassigned)
+            db.flush()
             new_order.delivery_status = "RIDER_SEARCHING"
-            history = DeliveryStatusHistory(
-                order_id=new_order.id,
-                delivery_assignment_id=None,
-                rider_id=None,
-                status="RIDER_SEARCHING",
-                latitude=_json.loads(delivery_snapshot).get("latitude") if delivery_snapshot else None,
-                longitude=_json.loads(delivery_snapshot).get("longitude") if delivery_snapshot else None,
-                notes="Delivery order created, searching for available rider"
-            )
-            db.add(history)
-            db.commit()
-
-            # Automatically dispatch to the nearest available online rider
             try:
-                from ..services.dispatch import dispatch_order
-                dispatch_order(db, new_order.id)
-            except Exception as _disp_err:
-                logger.error(f"Failed to auto-dispatch order {new_order.id}: {_disp_err}")
+                lat = None
+                lng = None
+                if delivery_snapshot:
+                    snap_data = _json.loads(delivery_snapshot) if isinstance(delivery_snapshot, str) else delivery_snapshot
+                    lat = snap_data.get("latitude")
+                    lng = snap_data.get("longitude")
+                history = DeliveryStatusHistory(
+                    order_id=new_order.id,
+                    delivery_assignment_id=unassigned.id,
+                    rider_id=None,
+                    status="RIDER_SEARCHING",
+                    latitude=lat,
+                    longitude=lng,
+                    notes="Delivery order created. Waiting for supervisor to assign delivery partner."
+                )
+                db.add(history)
+            except Exception as hist_err:
+                import logging
+                logging.warning(f"Could not record initial DeliveryStatusHistory: {hist_err}")
+            db.commit()
         else:
             db.commit()
 
@@ -1272,6 +1307,7 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
             if not session_bill_no:
                 session_bill_no = next((o.bill_no for o in sibling_orders if o.bill_no), None)
             if not session_bill_no:
+                db.query(Restaurant.id).filter(Restaurant.id == order.restaurant_id).with_for_update().first()
                 max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
                 session_bill_no = (max_bill_no or 0) + 1
 
@@ -1993,7 +2029,7 @@ def recalculate_order_financials(order: Order, db: Session) -> Decimal:
     else:
         new_discount = Decimal('0.00')
 
-    delivery_fee = _to_decimal(order.delivery_fee)
+    delivery_fee = Decimal('0.00') if (getattr(order, "order_type", "") or "").upper() == "DELIVERY" else _to_decimal(order.delivery_fee)
     packaging_fee = _to_decimal(order.packaging_fee)
     tip_amount = _to_decimal(order.tip_amount)
 
@@ -2534,7 +2570,8 @@ def get_order_by_id(
                 "status": oi_status
             })
 
-    total_delivery_fee = sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    is_any_delivery = any((getattr(o, "order_type", "") or "").upper() == "DELIVERY" for o in sibling_orders) or ((getattr(order, "order_type", "") or "").upper() == "DELIVERY")
+    total_delivery_fee = 0.0 if is_any_delivery else sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_packaging_fee = sum(float(getattr(o, "packaging_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_tip_amount = sum(float(getattr(o, "tip_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_discount_amount = sum(float(getattr(o, "discount_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
@@ -2680,7 +2717,8 @@ def get_public_order(
                 "status": oi_status
             })
 
-    total_delivery_fee = sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
+    is_any_delivery = any((getattr(o, "order_type", "") or "").upper() == "DELIVERY" for o in sibling_orders) or ((getattr(order, "order_type", "") or "").upper() == "DELIVERY")
+    total_delivery_fee = 0.0 if is_any_delivery else sum(float(getattr(o, "delivery_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_packaging_fee = sum(float(getattr(o, "packaging_fee", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_tip_amount = sum(float(getattr(o, "tip_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")
     total_discount_amount = sum(float(getattr(o, "discount_amount", 0.0) or 0.0) for o in sibling_orders if (o.status or "").upper() != "CANCELLED")

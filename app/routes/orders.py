@@ -563,6 +563,10 @@ def create_pos_order(
                 if sibling_bill and sibling_bill[0]:
                     assigned_bill_no = sibling_bill[0]
             if not assigned_bill_no:
+
+                from sqlalchemy import func
+                db.query(Restaurant.id).filter(Restaurant.id == res_id).with_for_update().first()
+
                 max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
                 assigned_bill_no = (max_bill_no or 0) + 1
 

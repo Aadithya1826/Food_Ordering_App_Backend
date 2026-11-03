@@ -57,12 +57,34 @@ def get_categories(
 @router.get("/api/v1/public/menu/categories", response_model=list[MenuCategoryResponse])
 def get_public_categories(
     request: Request,
+    order_type: str | None = None,
+    ac_type: str | None = None,
     db: Session = Depends(get_db)
 ):
     restaurant_id = _parse_public_restaurant_id(request)
     query = db.query(MenuCategory)
     if restaurant_id is not None:
         query = query.filter(MenuCategory.restaurant_id == restaurant_id)
+
+    req_order_type = (order_type or request.query_params.get("order_type", "")).strip().lower()
+    req_ac_type = (ac_type or request.query_params.get("ac_type", "")).strip().lower()
+
+    if req_order_type in ["delivery", "deliv"] or req_ac_type in ["ac", "a/c", "both"]:
+        # In delivery section: only return categories with active AC menu items for this restaurant
+        ac_filters = [
+            MenuItem.is_deleted == False,
+            or_(
+                MenuItem.ac_type.ilike("%both%"),
+                MenuItem.ac_type.ilike("%a/c%"),
+                MenuItem.ac_type.ilike("%ac%"),
+            ),
+            ~MenuItem.ac_type.ilike("%non%")
+        ]
+        if restaurant_id is not None:
+            ac_filters.append(MenuItem.restaurant_id == restaurant_id)
+        ac_item_category_ids = db.query(MenuItem.category_id).filter(*ac_filters).distinct()
+        query = query.filter(MenuCategory.id.in_(ac_item_category_ids))
+
     return query.all()
 
 # GET items
@@ -91,12 +113,31 @@ def get_items(
 @router.get("/api/v1/public/menu/items", response_model=list[MenuItemResponse])
 def get_public_items(
     request: Request,
+    order_type: str | None = None,
+    ac_type: str | None = None,
     db: Session = Depends(get_db)
 ):
     restaurant_id = _parse_public_restaurant_id(request)
     query = db.query(MenuItem).filter(MenuItem.is_deleted == False)
     if restaurant_id is not None:
         query = query.filter(MenuItem.restaurant_id == restaurant_id)
+
+    req_order_type = (order_type or request.query_params.get("order_type", "")).strip().lower()
+    req_ac_type = (ac_type or request.query_params.get("ac_type", "")).strip().lower()
+
+    # In the delivery section: fetch the AC menu items for the respective restaurant!
+    if req_order_type in ["delivery", "deliv"] or req_ac_type in ["ac", "a/c", "both"]:
+        query = query.filter(
+            or_(
+                MenuItem.ac_type.ilike("%both%"),
+                MenuItem.ac_type.ilike("%a/c%"),
+                MenuItem.ac_type.ilike("%ac%"),
+            ),
+            ~MenuItem.ac_type.ilike("%non%")
+        )
+    elif req_ac_type in ["non_ac", "non-ac", "non a/c"]:
+        query = query.filter(MenuItem.ac_type.ilike("%non%"))
+
     return query.all()
 
 

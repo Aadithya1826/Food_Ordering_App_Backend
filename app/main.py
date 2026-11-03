@@ -90,6 +90,7 @@ if allowed_origins:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
 else:
     app.add_middleware(
@@ -98,24 +99,50 @@ else:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
 
+# Universal preflight OPTIONS handler for seamless CORS between dine-in, takeaway, and delivery
+@app.options("/{full_path:path}")
+async def preflight_options_handler(full_path: str, request: Request):
+    origin = request.headers.get("origin") or "*"
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok"},
+        headers={
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
 
 app.include_router(auth.router)
 
 # Global handler so CORS headers are present even on unhandled errors.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    origin = request.headers.get("origin") or "*"
+    cors_headers = {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+    }
     if isinstance(exc, HTTPException):
+        headers = dict(getattr(exc, "headers", None) or {})
+        headers.update(cors_headers)
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
-            headers=getattr(exc, "headers", None)
+            headers=headers
         )
     logger.error(f"Unhandled exception: {exc}\n{traceback.format_exc()}")
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal Server Error"}
+        content={"detail": "Internal Server Error"},
+        headers=cors_headers
     )
 app.include_router(menu.router)
 app.include_router(orders.router)

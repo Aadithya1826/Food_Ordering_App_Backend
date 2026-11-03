@@ -182,17 +182,50 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
     ).order_by(DeliveryStatusHistory.created_at.asc()).all()
 
     timeline = [
-        {"status": r.status, "created_at": r.created_at.isoformat()}
+        {"status": r.status, "created_at": r.created_at.isoformat(), "notes": r.notes}
         for r in timeline_records
     ]
+
+    # Resolve Delivery OTP (only if assigned by supervisor)
+    import re
+    otp_code = None
+    for r in reversed(timeline_records):
+        if r.notes and "OTP" in r.notes:
+            m = re.search(r"OTP:\s*([0-9]{4,6})", r.notes, re.IGNORECASE)
+            if m:
+                otp_code = m.group(1)
+                break
+
+    actual_partner = getattr(assignment, "delivery_partner", None) if assignment else None
+    actual_eta = getattr(assignment, "estimated_delivery_time", None) if assignment else None
+    actual_tracking_url = getattr(assignment, "tracking_url", None) if assignment else None
+
+    # Only treat as assigned if supervisor has actually set a partner/rider
+    is_assigned = bool(assignment and assignment.status not in ["UNASSIGNED", "CANCELLED"] and (actual_partner or assignment.rider_id))
+
+    if not is_assigned:
+        rider_data = None
+        otp_code = None
+
+    if rider_data and is_assigned:
+        rider_data["delivery_partner"] = actual_partner
+        rider_data["partner"] = actual_partner
+        rider_data["estimated_delivery_time"] = actual_eta
+        rider_data["eta"] = actual_eta
+        rider_data["tracking_url"] = actual_tracking_url
+        rider_data["otp"] = otp_code
 
     assignment_data = None
     if assignment:
         assignment_data = {
             "id": assignment.id,
             "status": assignment.status,
-            "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
-            "picked_up_at": assignment.picked_up_at.isoformat() if assignment.picked_up_at else None,
+            "delivery_partner": actual_partner if is_assigned else None,
+            "estimated_delivery_time": actual_eta if is_assigned else None,
+            "tracking_url": actual_tracking_url if is_assigned else None,
+            "otp": otp_code if is_assigned else None,
+            "assigned_at": assignment.assigned_at.isoformat() if (is_assigned and assignment.assigned_at) else None,
+            "picked_up_at": assignment.picked_up_at.isoformat() if (is_assigned and assignment.picked_up_at) else None,
             "delivered_at": assignment.delivered_at.isoformat() if assignment.delivered_at else None,
         }
 
@@ -221,6 +254,10 @@ def get_order_tracking(order_id: int, db: Session = Depends(get_db)):
         "order_id": order.id,
         "order_status": order.status,
         "delivery_status": delivery_status,
+        "otp": otp_code,
+        "delivery_partner": getattr(assignment, "delivery_partner", None) or (rider_data.get("delivery_partner") if rider_data else None),
+        "estimated_delivery_time": getattr(assignment, "estimated_delivery_time", None) or (rider_data.get("estimated_delivery_time") if rider_data else None),
+        "tracking_url": getattr(assignment, "tracking_url", None) if assignment else None,
         "assignment": assignment_data,
         "restaurant": {
             "id": restaurant.id if restaurant else None,

@@ -48,6 +48,10 @@ class DeliveryAssignment(Base):
     arrived_customer_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
     failure_reason = Column(Text, nullable=True)
+    earnings = Column(Float, nullable=True)
+    delivery_partner = Column(String(50), nullable=True)
+    estimated_delivery_time = Column(String(50), nullable=True)
+    tracking_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
