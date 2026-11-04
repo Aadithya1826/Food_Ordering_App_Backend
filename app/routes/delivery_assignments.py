@@ -65,7 +65,7 @@ def get_available_orders(db: Session = Depends(get_db)):
     ).subquery()
     
     available_orders = db.query(Order).filter(
-        Order.order_type == "DELIVERY",
+        Order.order_type.in_(["DELIVERY", "Delivery"]),
         Order.status.in_(["PENDING", "CONFIRMED", "PREPARING", "READY"]),
         ~Order.id.in_(active_assignments)
     ).order_by(Order.created_at.desc()).all()
@@ -172,3 +172,200 @@ def failed(assignment_id: int, current_rider: dict = Depends(get_current_rider),
 def cancel(assignment_id: int, current_rider: dict = Depends(get_current_rider), db: Session = Depends(get_db)):
     check_rider_ownership(db, assignment_id, current_rider.id)
     return update_delivery_status(db, assignment_id, "CANCELLED")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Supervisor / Admin Third-Party Partner Assignment & Status Override
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ThirdPartyPartnerPayload(BaseModel):
+    partner: str
+    rider_name: str
+    rider_phone: str
+    vehicle_type: Optional[str] = "Bike"
+    vehicle_number: Optional[str] = None
+    eta: Optional[str] = "25 mins"
+    tracking_url: Optional[str] = None
+    otp: Optional[str] = "4821"
+
+@router.post("/api/v1/delivery/orders/{order_id}/assign-partner")
+def assign_third_party_partner(order_id: int, payload: ThirdPartyPartnerPayload, db: Session = Depends(get_db)):
+    from ..models.delivery import DeliveryPartner, DeliveryStatusHistory
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    clean_phone = payload.rider_phone.replace("+91", "").strip()
+    rider = db.query(DeliveryPartner).filter(DeliveryPartner.phone.like(f"%{clean_phone}%")).first()
+    if not rider:
+        rider = DeliveryPartner(
+            name=payload.rider_name,
+            phone=payload.rider_phone,
+            vehicle_type=payload.vehicle_type or "Bike",
+            vehicle_number=payload.vehicle_number or "TN-01-EXP-001",
+            is_online=True,
+            is_active=True,
+            is_available=False
+        )
+        db.add(rider)
+        db.flush()
+    else:
+        rider.name = payload.rider_name
+        rider.vehicle_type = payload.vehicle_type or rider.vehicle_type
+        if payload.vehicle_number:
+            rider.vehicle_number = payload.vehicle_number
+        db.flush()
+
+    assignment = db.query(DeliveryAssignment).filter(
+        DeliveryAssignment.order_id == order_id
+    ).order_by(DeliveryAssignment.id.desc()).first()
+
+    now = datetime.utcnow()
+    if assignment:
+        assignment.rider_id = rider.id
+        assignment.delivery_partner = payload.partner
+        assignment.estimated_delivery_time = payload.eta
+        assignment.tracking_url = payload.tracking_url
+        assignment.status = "OUT_FOR_DELIVERY"
+        assignment.assigned_at = now
+        assignment.accepted_at = now
+        assignment.picked_up_at = now
+    else:
+        assignment = DeliveryAssignment(
+            order_id=order_id,
+            rider_id=rider.id,
+            delivery_partner=payload.partner,
+            estimated_delivery_time=payload.eta,
+            tracking_url=payload.tracking_url,
+            status="OUT_FOR_DELIVERY",
+            assigned_at=now,
+            accepted_at=now,
+            picked_up_at=now
+        )
+        db.add(assignment)
+        db.flush()
+
+    order.delivery_status = "OUT_FOR_DELIVERY"
+    order.status = "READY"
+    order.updated_at = now
+
+    otp_str = payload.otp or "4821"
+    history = DeliveryStatusHistory(
+        order_id=order_id,
+        delivery_assignment_id=assignment.id,
+        rider_id=rider.id,
+        status="OUT_FOR_DELIVERY",
+        notes=f"Assigned to {payload.partner} rider {payload.rider_name} ({payload.rider_phone}). OTP: {otp_str}. ETA: {payload.eta or '25 mins'}. Order is Out for Delivery."
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(assignment)
+
+    return {
+        "success": True,
+        "message": f"Successfully assigned {payload.partner} rider {payload.rider_name}",
+        "assignment_id": assignment.id,
+        "order_id": order.id,
+        "partner": payload.partner,
+        "rider_name": payload.rider_name,
+        "rider_phone": payload.rider_phone,
+        "vehicle_type": payload.vehicle_type,
+        "vehicle_number": payload.vehicle_number,
+        "eta": payload.eta,
+        "otp": otp_str,
+        "status": assignment.status
+    }
+
+
+class UpdateDeliveryStatusPayload(BaseModel):
+    status: str
+    notes: Optional[str] = None
+    otp: Optional[str] = None
+
+@router.post("/api/v1/delivery/orders/{order_id}/status")
+def update_order_delivery_status(order_id: int, payload: UpdateDeliveryStatusPayload, db: Session = Depends(get_db)):
+    from ..models.delivery import DeliveryStatusHistory
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    assignment = db.query(DeliveryAssignment).filter(
+        DeliveryAssignment.order_id == order_id
+    ).order_by(DeliveryAssignment.id.desc()).first()
+
+    norm_status = payload.status.upper().replace(" ", "_")
+    now = datetime.utcnow()
+
+    # Third-Party Delivery Status Logic
+    if norm_status in ["DELIVERED", "COMPLETED"]:
+        order.delivery_status = "DELIVERED"
+        order.status = "COMPLETED"
+        order.updated_at = now
+
+        # Cash on Delivery (COD) Auto-Settlement
+        if order.payment_method in ["Cash", "COD"] and order.payment_status != "Paid":
+            order.payment_status = "Paid"
+
+        if assignment:
+            assignment.status = "DELIVERED"
+            assignment.delivered_at = now
+
+        # Auto-credit loyalty points (idempotent)
+        try:
+            from ..models.customer import Customer, LoyaltyTransaction
+            if order.customer_phone:
+                from ..utils.phone import normalize_phone
+                norm_phone = normalize_phone(order.customer_phone)
+                cust = db.query(Customer).filter(Customer.phone == norm_phone).first() or db.query(Customer).filter(Customer.phone == order.customer_phone).first()
+                if cust:
+                    existing = db.query(LoyaltyTransaction).filter(
+                        LoyaltyTransaction.order_id == order.id,
+                        LoyaltyTransaction.transaction_type == "ORDER_CREDIT"
+                    ).first()
+                    if not existing:
+                        RUPEES_PER_POINT = 10
+                        base_amt = (order.total_amount or 0) - (order.tip_amount or 0) - (order.delivery_fee or 0)
+                        pts = max(0, int(base_amt // RUPEES_PER_POINT))
+                        if pts > 0:
+                            tx = LoyaltyTransaction(
+                                customer_id=cust.id,
+                                order_id=order.id,
+                                transaction_type="ORDER_CREDIT",
+                                points=pts,
+                                notes=f"Points earned for delivery order #{order.id}",
+                                created_at=now
+                            )
+                            db.add(tx)
+                            cust.loyalty_points = (cust.loyalty_points or 0) + pts
+        except Exception as e:
+            print("[Loyalty Auto-Credit Error]:", e)
+
+    elif norm_status in ["OUT_FOR_DELIVERY", "PICKED_UP"]:
+        order.delivery_status = "OUT_FOR_DELIVERY"
+        order.updated_at = now
+        if assignment:
+            assignment.status = "OUT_FOR_DELIVERY"
+            assignment.picked_up_at = now
+    else:
+        order.delivery_status = norm_status
+        order.updated_at = now
+        if assignment:
+            assignment.status = norm_status
+
+    history = DeliveryStatusHistory(
+        order_id=order_id,
+        delivery_assignment_id=assignment.id if assignment else None,
+        rider_id=assignment.rider_id if assignment else None,
+        status=norm_status,
+        notes=payload.notes or f"Third-party delivery status updated to {norm_status}"
+    )
+    db.add(history)
+    db.commit()
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "status": order.status,
+        "delivery_status": order.delivery_status,
+        "payment_status": order.payment_status
+    }
