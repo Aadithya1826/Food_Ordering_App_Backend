@@ -2519,9 +2519,11 @@ def get_order_by_id(
     table_number_map = build_table_number_map(db, [order])
 
 
-    # If this order belongs to a settled bill or dine-in session, aggregate all active sibling orders
+    # If this order belongs to a settled bill or dine-in session, aggregate all active sibling orders (Dine-In ONLY)
     sibling_orders = [order]
-    if (order.status or "").upper() != "CANCELLED":
+    order_type_norm = (order.order_type or "").upper()
+    is_dine_in_order = order_type_norm in ["DINE_IN", "DINE IN"]
+    if (order.status or "").upper() != "CANCELLED" and is_dine_in_order:
         if order.dine_in_session_id:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
@@ -2532,12 +2534,14 @@ def get_order_by_id(
             ).order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
-        elif order.bill_no:
+        elif order.bill_no and order.table_id:
             order_date = order.created_at.date() if order.created_at else None
             q = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
                 Order.bill_no == order.bill_no,
+                Order.table_id == order.table_id,
+                Order.order_type.in_(["DINE_IN", "DINE IN"]),
                 Order.restaurant_id == restaurant_id,
                 Order.status != "CANCELLED"
             )
@@ -2668,7 +2672,9 @@ def get_public_order(
     table_number_map = build_table_number_map(db, [order])
 
     sibling_orders = [order]
-    if (order.status or "").upper() != "CANCELLED":
+    order_type_norm = (order.order_type or "").upper()
+    is_dine_in_order = order_type_norm in ["DINE_IN", "DINE IN"]
+    if (order.status or "").upper() != "CANCELLED" and is_dine_in_order:
         if order.dine_in_session_id:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
@@ -2679,12 +2685,14 @@ def get_public_order(
             ).order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
-        elif order.bill_no:
+        elif order.bill_no and order.table_id:
             order_date = order.created_at.date() if order.created_at else None
             q = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
                 Order.bill_no == order.bill_no,
+                Order.table_id == order.table_id,
+                Order.order_type.in_(["DINE_IN", "DINE IN"]),
                 Order.restaurant_id == restaurant_id,
                 Order.status != "CANCELLED"
             )

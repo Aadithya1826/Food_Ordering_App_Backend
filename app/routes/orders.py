@@ -553,6 +553,14 @@ def create_pos_order(
         cust_phone_clean = payload.customer_phone.strip() if payload.customer_phone and payload.customer_phone.strip() else None
 
         assigned_bill_no = payload.bill_no
+        if assigned_bill_no and not dine_in_sess_id:
+            existing_bill = db.query(Order.id).filter(
+                Order.bill_no == assigned_bill_no,
+                Order.restaurant_id == res_id
+            ).first()
+            if existing_bill:
+                assigned_bill_no = None
+
         if not assigned_bill_no:
             if dine_in_sess_id:
                 sibling_bill = db.query(Order.bill_no).filter(
