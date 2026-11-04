@@ -45,6 +45,7 @@ def get_live_orders(
         Order.created_at >= cutoff,
         or_(
             Order.status != "SERVED",
+            (Order.order_type.in_(["DELIVERY", "Delivery"])),
             (
                 (Order.order_type == "DINE_IN") &
                 (Order.payment_status != "Paid") &
@@ -149,6 +150,7 @@ def get_live_orders(
             "customer_phone": customer_phone or o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
+            "delivery_status": getattr(o, "delivery_status", None),
             "dine_in_session_id": o.dine_in_session_id,
             "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
             "placed_by_user_id": placed_by_user_id,
@@ -334,6 +336,7 @@ def get_all_orders(
             "customer_phone": customer_phone or o.customer_phone,
             "customer_name": customer_name,
             "delivery_address": o.delivery_address_snapshot,
+            "delivery_status": getattr(o, "delivery_status", None),
             "dine_in_session_id": o.dine_in_session_id,
             "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
             "client_order_id": getattr(o, "client_order_id", None),
