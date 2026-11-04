@@ -53,7 +53,7 @@ def health_ready():
 os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "images"), exist_ok=True)
 
 # pyrefly: ignore [missing-import]
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from .db import SessionLocal
 from .models.menu import MenuItem
 import urllib.parse
@@ -103,6 +103,11 @@ else:
     )
 
 # Universal preflight OPTIONS handler for seamless CORS between dine-in, takeaway, and delivery
+@app.get("/data:image/{rest:path}")
+@app.get("/data%3Aimage/{rest:path}")
+async def handle_data_uri_request(rest: str):
+    return Response(status_code=204)
+
 @app.options("/{full_path:path}")
 async def preflight_options_handler(full_path: str, request: Request):
     origin = request.headers.get("origin") or "*"

@@ -27,7 +27,7 @@ import hashlib
 import time
 from jose import jwt
 from ..utils.table_refs import build_table_number_map, resolve_order_table_number
-from ..utils.dependencies import get_current_customer
+from ..utils.dependencies import get_current_customer, get_db
 
 try:
     # pyrefly: ignore [missing-import]
@@ -37,12 +37,7 @@ except Exception:
 
 router = APIRouter(tags=["Customer"])
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# get_db imported from ..utils.dependencies for unified session caching
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -465,7 +460,9 @@ def update_customer_profile(
     if customer_id != current_customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to update this profile")
         
-    customer = current_customer
+    customer = db.query(Customer).filter(Customer.id == current_customer.id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
     if payload.name is not None and payload.name.strip():
         customer.name = payload.name.strip()
     if payload.email is not None:
@@ -508,7 +505,9 @@ async def upload_profile_picture_v2(
     if customer_id != current_customer.id:
         raise HTTPException(status_code=403, detail="Not authorized to upload picture for this profile")
         
-    customer = current_customer
+    customer = db.query(Customer).filter(Customer.id == current_customer.id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     ext = (file.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
     if ext not in ("jpg", "jpeg", "png", "webp"):
