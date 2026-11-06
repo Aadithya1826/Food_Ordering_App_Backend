@@ -4,12 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from sqlalchemy.orm import Session, joinedload
 # pyrefly: ignore [missing-import]
 from sqlalchemy import or_, func
+# pyrefly: ignore [missing-import]
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Any, Union
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
+from ..models.restaurant import Restaurant
 from ..schemas.order import OrderStatusUpdate, OrderPaymentStatusUpdate
 from ..utils.dependencies import get_current_user
 from ..utils.roles import require_role, resolve_restaurant_id, require_restaurant_access
@@ -80,6 +83,7 @@ def get_live_orders(
     needs_bill_no = any(not o.bill_no for o in orders)
     current_max_bill = 0
     if needs_bill_no:
+        # pyrefly: ignore [missing-import]
         from sqlalchemy import func
         current_max_bill = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
 
@@ -128,10 +132,22 @@ def get_live_orders(
         placed_by_name = user_map.get(o.user_id) if o.user_id else None
         placed_by_user_id = o.user_id
 
-        # Ensure bill_no is always populated for KOT verification
+        # Ensure bill_no is always populated for KOT verification, preserving Dine-In session shared bill
         if not o.bill_no:
-            current_max_bill += 1
-            o.bill_no = current_max_bill
+            if o.dine_in_session_id:
+                sibling_b = db.query(Order.bill_no).filter(
+                    Order.dine_in_session_id == o.dine_in_session_id,
+                    Order.bill_no.isnot(None)
+                ).first()
+                if sibling_b and sibling_b[0]:
+                    o.bill_no = sibling_b[0]
+                    has_db_changes = True
+                    continue
+                # pyrefly: ignore [missing-import]
+            from sqlalchemy import func
+            db.query(Restaurant.id).filter(Restaurant.id == o.restaurant_id).with_for_update().first()
+            max_b = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == o.restaurant_id).scalar() or 0
+            o.bill_no = (max_b or 0) + 1
             has_db_changes = True
 
         response.append({
@@ -556,6 +572,17 @@ def create_pos_order(
         cust_phone_clean = payload.customer_phone.strip() if payload.customer_phone and payload.customer_phone.strip() else None
 
         assigned_bill_no = payload.bill_no
+        if assigned_bill_no:
+            # Check if this bill_no is already taken by any order not in this session
+            conflict_q = db.query(Order.id).filter(
+                Order.bill_no == assigned_bill_no,
+                Order.restaurant_id == res_id
+            )
+            if dine_in_sess_id:
+                conflict_q = conflict_q.filter(or_(Order.dine_in_session_id != dine_in_sess_id, Order.dine_in_session_id.is_(None)))
+            if conflict_q.first():
+                assigned_bill_no = None
+
         if not assigned_bill_no:
             if dine_in_sess_id:
                 sibling_bill = db.query(Order.bill_no).filter(
@@ -566,10 +593,9 @@ def create_pos_order(
                 if sibling_bill and sibling_bill[0]:
                     assigned_bill_no = sibling_bill[0]
             if not assigned_bill_no:
-
+                # pyrefly: ignore [missing-import]
                 from sqlalchemy import func
                 db.query(Restaurant.id).filter(Restaurant.id == res_id).with_for_update().first()
-
                 max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
                 assigned_bill_no = (max_bill_no or 0) + 1
 

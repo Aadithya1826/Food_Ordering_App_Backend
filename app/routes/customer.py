@@ -808,7 +808,11 @@ def place_order(
         # For DINE_IN, Order More MUST create a brand new Order row with status PENDING under the active session.
         # It must NEVER mutate the previous order's items or status.
         is_dine_in_req = is_dine_in
-        if payload.order_id and is_dine_in_req:
+        if not is_dine_in_req:
+            # Non-Dine-In orders (Delivery and Takeaway) are strictly discrete orders.
+            # They must NEVER append items to or mutate an existing order!
+            payload.order_id = None
+        elif payload.order_id and is_dine_in_req:
             # Look up existing order to inherit table/session context if not passed
             prev_order = db.query(Order).filter(
                 Order.id == payload.order_id,
@@ -1066,8 +1070,11 @@ def place_order(
                     candidate_session = session_query.filter(
                         DineInSession.customer_phone == cust_phone
                     ).with_for_update().first()
-                if not candidate_session:
-                    candidate_session = session_query.with_for_update().first()
+                if not candidate_session and not cust_phone:
+                    # Only fallback to unowned session if customer phone is not specified
+                    candidate_session = session_query.filter(
+                        DineInSession.customer_phone.is_(None)
+                    ).with_for_update().first()
 
             if candidate_session:
                 # Strictly check if candidate_session has active (non-cancelled, unpaid) orders or is fresh (0 orders).
@@ -1295,7 +1302,10 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
         sibling_orders = [order]
         session_bill_no = order.bill_no
 
-        if order.dine_in_session_id:
+        order_type_norm = (order.order_type or "").upper()
+        is_dine_in_order = order_type_norm in ["DINE_IN", "DINE IN"]
+
+        if is_dine_in_order and order.dine_in_session_id:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
@@ -1321,8 +1331,11 @@ def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Sessi
         else:
             order.payment_status = "Paid"
             order.payment_method = payload.payment_method or "Pay at Counter"
-            order.status = "SERVED"
+            # Only Dine-In orders transition to SERVED upon bill payment
+            if is_dine_in_order and (order.status or "").upper() in ["CONFIRMED", "PENDING", "PREPARING", "READY"]:
+                order.status = "SERVED"
             if not order.bill_no:
+                db.query(Restaurant.id).filter(Restaurant.id == order.restaurant_id).with_for_update().first()
                 max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
                 order.bill_no = (max_bill_no or 0) + 1
             session_bill_no = order.bill_no
@@ -1738,7 +1751,8 @@ def settle_dine_in_session(
         if existing_bill_no:
             session_bill_no = existing_bill_no
         else:
-            max_bill_no = db.query(func.max(Order.bill_no)).scalar() or 0
+            db.query(Restaurant.id).filter(Restaurant.id == restaurant_id).with_for_update().first()
+            max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == restaurant_id).scalar() or 0
             session_bill_no = (max_bill_no or 0) + 1
 
         # Update all session orders
@@ -1844,13 +1858,19 @@ def _find_order_by_id_or_ref(db: Session, order_id_val: Any, restaurant_id: Opti
 
     # 1. If restaurant_id is specified (> 0), strictly restrict to that restaurant.
     if restaurant_id is not None and restaurant_id > 0:
-        cand_q = q.filter(
-            (Order.id == clean_id) | (Order.branch_order_id == clean_id),
-            Order.restaurant_id == restaurant_id
-        )
+        # Match by primary key Order.id first to avoid collision with another order's branch_order_id
+        cand_q = q.filter(Order.id == clean_id, Order.restaurant_id == restaurant_id)
         if for_update:
             cand_q = cand_q.with_for_update()
-        return cand_q.first()
+        found_order = cand_q.first()
+        if found_order:
+            return found_order
+
+        # Fallback to branch_order_id ONLY if no order matched by PK
+        branch_q = q.filter(Order.branch_order_id == clean_id, Order.restaurant_id == restaurant_id)
+        if for_update:
+            branch_q = branch_q.with_for_update()
+        return branch_q.first()
 
     # 2. If restaurant_id is omitted, match by unique global PK only
     cand_q = q.filter(Order.id == clean_id)
@@ -2426,14 +2446,15 @@ def verify_payment(payload: RazorpayVerifyPayload, db: Session = Depends(get_db)
 def get_public_active_order_for_table(table_number: str, restaurant_id: int = 1, db: Session = Depends(get_db)):
     clean_table = table_number.strip()
     table = db.query(Table).filter(Table.table_number.ilike(f"%{clean_table}%"), Table.restaurant_id == restaurant_id).first()
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
     
-    query = db.query(Order).filter(Order.restaurant_id == restaurant_id)
-    # pyrefly: ignore [missing-import]
-    from sqlalchemy import cast, String
-    if table:
-        query = query.filter(cast(Order.table_id, String) == str(table.id))
-    
-    order = query.filter(Order.status.in_(["PENDING", "CONFIRMED", "PREPARING", "READY"])).order_by(Order.id.desc()).first()
+    order = db.query(Order).filter(
+        Order.restaurant_id == restaurant_id,
+        Order.table_id == table.id,
+        Order.order_type.in_(["DINE_IN", "DINE IN"]),
+        Order.status.in_(["PENDING", "CONFIRMED", "PREPARING", "READY"])
+    ).order_by(Order.id.desc()).first()
 
     if not order:
         raise HTTPException(status_code=404, detail="No active order for this table")
@@ -2519,31 +2540,23 @@ def get_order_by_id(
     table_number_map = build_table_number_map(db, [order])
 
 
-    # If this order belongs to a settled bill or dine-in session, aggregate all active sibling orders
+    # Sibling orders aggregation: ONLY for Dine-In orders with a verified active DineInSession
     sibling_orders = [order]
-    if (order.status or "").upper() != "CANCELLED":
-        if order.dine_in_session_id:
+    order_type_norm = (order.order_type or "").upper()
+    is_dine_in_order = order_type_norm in ["DINE_IN", "DINE IN"]
+    if (order.status or "").upper() != "CANCELLED" and is_dine_in_order and order.dine_in_session_id:
+        sess = db.query(DineInSession).filter(
+            DineInSession.id == order.dine_in_session_id,
+            DineInSession.restaurant_id == restaurant_id
+        ).first()
+        if sess:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
-                Order.dine_in_session_id == order.dine_in_session_id,
+                Order.dine_in_session_id == sess.id,
                 Order.restaurant_id == restaurant_id,
                 Order.status != "CANCELLED"
             ).order_by(Order.id.asc()).all()
-            if not sibling_orders:
-                sibling_orders = [order]
-        elif order.bill_no:
-            order_date = order.created_at.date() if order.created_at else None
-            q = db.query(Order).options(
-                joinedload(Order.items).joinedload(OrderItem.menu_item)
-            ).filter(
-                Order.bill_no == order.bill_no,
-                Order.restaurant_id == restaurant_id,
-                Order.status != "CANCELLED"
-            )
-            if order_date:
-                q = q.filter(func.date(Order.created_at) == order_date)
-            sibling_orders = q.order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
 
@@ -2667,30 +2680,23 @@ def get_public_order(
 
     table_number_map = build_table_number_map(db, [order])
 
+    # Sibling orders aggregation: ONLY for Dine-In orders with a verified active DineInSession
     sibling_orders = [order]
-    if (order.status or "").upper() != "CANCELLED":
-        if order.dine_in_session_id:
+    order_type_norm = (order.order_type or "").upper()
+    is_dine_in_order = order_type_norm in ["DINE_IN", "DINE IN"]
+    if (order.status or "").upper() != "CANCELLED" and is_dine_in_order and order.dine_in_session_id:
+        sess = db.query(DineInSession).filter(
+            DineInSession.id == order.dine_in_session_id,
+            DineInSession.restaurant_id == restaurant_id
+        ).first()
+        if sess:
             sibling_orders = db.query(Order).options(
                 joinedload(Order.items).joinedload(OrderItem.menu_item)
             ).filter(
-                Order.dine_in_session_id == order.dine_in_session_id,
+                Order.dine_in_session_id == sess.id,
                 Order.restaurant_id == restaurant_id,
                 Order.status != "CANCELLED"
             ).order_by(Order.id.asc()).all()
-            if not sibling_orders:
-                sibling_orders = [order]
-        elif order.bill_no:
-            order_date = order.created_at.date() if order.created_at else None
-            q = db.query(Order).options(
-                joinedload(Order.items).joinedload(OrderItem.menu_item)
-            ).filter(
-                Order.bill_no == order.bill_no,
-                Order.restaurant_id == restaurant_id,
-                Order.status != "CANCELLED"
-            )
-            if order_date:
-                q = q.filter(func.date(Order.created_at) == order_date)
-            sibling_orders = q.order_by(Order.id.asc()).all()
             if not sibling_orders:
                 sibling_orders = [order]
 
@@ -2811,27 +2817,8 @@ def get_customer_orders_by_phone(
         is_dine_in = ord_type in ["DINE_IN", "DINE IN"]
 
         group_key = None
-        if is_dine_in:
-            if not order.bill_no:
-                if order.dine_in_session_id:
-                    sibling_bill = db.query(Order.bill_no).filter(
-                        Order.dine_in_session_id == order.dine_in_session_id,
-                        Order.bill_no.isnot(None)
-                    ).first()
-                    if sibling_bill and sibling_bill[0]:
-                        order.bill_no = sibling_bill[0]
-                    else:
-                        max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
-                        order.bill_no = (max_bill_no or 0) + 1
-                else:
-                    max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == order.restaurant_id).scalar() or 0
-                    order.bill_no = (max_bill_no or 0) + 1
-                db.commit()
-
-            if order.dine_in_session_id:
-                group_key = f"dinein_sess_{order.restaurant_id}_{order.dine_in_session_id}"
-            elif order.bill_no:
-                group_key = f"dinein_bill_{order.restaurant_id}_{order.bill_no}"
+        if is_dine_in and order.dine_in_session_id:
+            group_key = f"dinein_sess_{order.restaurant_id}_{order.dine_in_session_id}"
 
         items = []
         for oi in order.items:
