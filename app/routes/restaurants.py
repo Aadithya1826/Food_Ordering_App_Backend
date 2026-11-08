@@ -30,12 +30,11 @@ def public_restaurants(db: Session = Depends(get_db)):
     """Public restaurant list for signup dropdown."""
     restaurants = db.query(Restaurant).all()
     for r in restaurants:
-        if not r.phone:
-            r_name_lower = (r.name or "").lower()
-            if r.id == 2 or "mgr" in r_name_lower:
-                r.phone = "+91 44 4852 4782"
-            elif r.id == 1 or "muga" in r_name_lower:
-                r.phone = "+91 95970 66563"
+        r_name_lower = (r.name or "").lower()
+        if r.id == 2 or "mgr" in r_name_lower:
+            r.phone = "+91 44 4852 4782"
+        elif r.id == 1 or "muga" in r_name_lower:
+            r.phone = "+91 95970 66563"
     return restaurants
 
 
@@ -81,12 +80,11 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
         total_revenue = stats.total_revenue or 0.0
 
         phone_val = restaurant.phone
-        if not phone_val:
-            r_name_lower = (restaurant.name or "").lower()
-            if restaurant.id == 2 or "mgr" in r_name_lower:
-                phone_val = "+91 44 4852 4782"
-            elif restaurant.id == 1 or "muga" in r_name_lower:
-                phone_val = "+91 95970 66563"
+        r_name_lower = (restaurant.name or "").lower()
+        if restaurant.id == 2 or "mgr" in r_name_lower:
+            phone_val = "+91 44 4852 4782"
+        elif restaurant.id == 1 or "muga" in r_name_lower:
+            phone_val = "+91 95970 66563"
 
         result.append(RestaurantResponse(
             id=restaurant.id,
