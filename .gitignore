@@ -10,3 +10,4 @@ cloudflared*
 dataudipi.db
 *.db
 inspect_schema.py
+extracted_bills*/
