@@ -118,13 +118,24 @@ def update_delivery_status(db: Session, assignment_id: int, new_status: str, not
             assignment.delivered_at = now
             order.status = "COMPLETED"  # Finalize the restaurant order status
             
-            # Compute earnings based on distance
-            if distance_km is not None:
-                RATE_PER_KM = 15
-                earned_amount = round(distance_km * RATE_PER_KM, 2)
-                if hasattr(assignment, "earnings"):
-                    assignment.earnings = earned_amount
-                # Customer delivery fee is 0.0 Rs (Free delivery). Never overwrite customer order delivery_fee.
+            # MaitreD Rider Delivery & Payout Logic:
+            # When customer pays money, delivery fee = Rs. 60
+            # Clean split:
+            #  - Rider Take-Home: Rs. 45
+            #  - ESI, PF, and Insurance: Rs. 12
+            #  - Platform fee for rider: Rs. 3 (Rs. 1 per km)
+            DELIVERY_FEE = 60.0
+            RIDER_TAKE_HOME = 45.0
+            ESI_PF_INSURANCE = 12.0
+            PLATFORM_FEE = 3.0  # Rs. 1 per km
+
+            earned_amount = RIDER_TAKE_HOME
+            if hasattr(assignment, "earnings"):
+                assignment.earnings = earned_amount
+
+            if hasattr(order, "delivery_fee"):
+                if order.delivery_fee is None or float(order.delivery_fee or 0) == 0.0:
+                    order.delivery_fee = DELIVERY_FEE
             # ── Loyalty auto-credit (backend-only, idempotent) ──────────────────
             try:
                 from ..models.customer import Customer, LoyaltyTransaction
