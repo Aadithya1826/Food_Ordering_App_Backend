@@ -1,4 +1,7 @@
+
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models.restaurant import Restaurant
@@ -25,7 +28,14 @@ def get_db():
 @router.get("/api/v1/public/restaurants", response_model=list[RestaurantResponse])
 def public_restaurants(db: Session = Depends(get_db)):
     """Public restaurant list for signup dropdown."""
-    return db.query(Restaurant).all()
+    restaurants = db.query(Restaurant).all()
+    for r in restaurants:
+        r_name_lower = (r.name or "").lower()
+        if r.id == 2 or "mgr" in r_name_lower:
+            r.phone = "+91 44 4852 4782"
+        elif r.id == 1 or "muga" in r_name_lower:
+            r.phone = "+91 95970 66563"
+    return restaurants
 
 
 @router.get("/api/v1/restaurants", response_model=list[RestaurantResponse])
@@ -50,7 +60,7 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
         ).first()
         
         manager_name = manager.name if manager else None
-        
+        # pyrefly: ignore [missing-import]
         from sqlalchemy import func, or_, and_
         stats = db.query(
             func.count(Order.id).label("total_orders"),
@@ -69,11 +79,18 @@ def list_restaurants(user = Depends(get_current_user), db: Session = Depends(get
         orders_count = stats.total_orders or 0
         total_revenue = stats.total_revenue or 0.0
 
+        phone_val = restaurant.phone
+        r_name_lower = (restaurant.name or "").lower()
+        if restaurant.id == 2 or "mgr" in r_name_lower:
+            phone_val = "+91 44 4852 4782"
+        elif restaurant.id == 1 or "muga" in r_name_lower:
+            phone_val = "+91 95970 66563"
+
         result.append(RestaurantResponse(
             id=restaurant.id,
             name=restaurant.name,
             address=restaurant.address,
-            phone=restaurant.phone,
+            phone=phone_val,
             latitude=restaurant.latitude,
             longitude=restaurant.longitude,
             created_at=restaurant.created_at,

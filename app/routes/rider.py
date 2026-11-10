@@ -1,3 +1,4 @@
+import logging
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException
 # pyrefly: ignore [missing-import]
@@ -13,6 +14,8 @@ from ..models.order import Order, OrderItem
 from ..models.restaurant import Restaurant
 from ..utils.auth import create_rider_token, verify_password, hash_password
 from ..utils.dependencies import get_current_rider
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -537,15 +540,18 @@ def get_rider_stats(current_rider=Depends(get_current_rider), db: Session = Depe
     today_earnings = 0.0
     for a in today_assignments:
         order = getattr(a, "order", None)
+        # MaitreD rider logic: Rs. 45 take-home per delivery + tip
+        earning = float(getattr(a, "earnings", 0.0) or 45.0)
+        today_earnings += earning
         if order:
-            today_earnings += float(getattr(order, "delivery_fee", 0.0) or 0.0)
             today_earnings += float(getattr(order, "tip_amount", 0.0) or 0.0)
 
     week_earnings = 0.0
     for a in week_assignments:
         order = getattr(a, "order", None)
+        earning = float(getattr(a, "earnings", 0.0) or 45.0)
+        week_earnings += earning
         if order:
-            week_earnings += float(getattr(order, "delivery_fee", 0.0) or 0.0)
             week_earnings += float(getattr(order, "tip_amount", 0.0) or 0.0)
 
     return {
@@ -554,6 +560,8 @@ def get_rider_stats(current_rider=Depends(get_current_rider), db: Session = Depe
         "total_rides": total_rides,
         "rating": rating,
         "this_week_earnings": round(week_earnings, 2),
+        "today_benefits": round(len(today_assignments) * 12.0, 2),
+        "this_week_benefits": round(len(week_assignments) * 12.0, 2),
     }
 
 
@@ -571,10 +579,10 @@ def get_delivery_history(current_rider=Depends(get_current_rider), db: Session =
         restaurant = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first() if order else None
 
         earnings = None
-        if order:
-            earnings = float(getattr(order, "delivery_fee", 0.0) or 0.0) + float(getattr(order, "tip_amount", 0.0) or 0.0)
-            if earnings == 0.0:
-                earnings = None
+        if assignment.status == "DELIVERED":
+            earnings = float(getattr(assignment, "earnings", 0.0) or 45.0)
+            if order and order.tip_amount:
+                earnings += float(order.tip_amount)
 
         # Parse customer name from delivery address snapshot
         customer_name = None
@@ -604,6 +612,10 @@ def get_delivery_history(current_rider=Depends(get_current_rider), db: Session =
             "customer_address": customer_address,
             "items_count": items_count,
             "earnings": earnings,
+            "delivery_fee": 60.0,
+            "rider_take_home": 45.0,
+            "esi_pf_insurance": 12.0,
+            "platform_fee": 3.0,
             "total_amount": float(order.total_amount) if order and order.total_amount else None,
         })
 
@@ -623,9 +635,9 @@ def get_earnings_history(current_rider=Depends(get_current_rider), db: Session =
     for assignment in assignments:
         date_str = (assignment.delivered_at or assignment.assigned_at or datetime.utcnow()).strftime("%Y-%m-%d")
         order = getattr(assignment, "order", None)
-        earnings = 0.0
-        if order:
-            earnings = float(getattr(order, "delivery_fee", 0.0) or 0.0) + float(getattr(order, "tip_amount", 0.0) or 0.0)
+        earnings = float(getattr(assignment, "earnings", 0.0) or 45.0)
+        if order and order.tip_amount:
+            earnings += float(order.tip_amount)
         
         earnings_by_date[date_str]["total_earnings"] += earnings
         earnings_by_date[date_str]["deliveries_count"] += 1

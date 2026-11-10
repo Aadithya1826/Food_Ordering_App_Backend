@@ -1,5 +1,7 @@
 import logging
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException, Request
+# pyrefly: ignore [missing-import]
 from sqlalchemy import func, or_, and_, cast, String, text
 
 logger = logging.getLogger(__name__)
@@ -1034,8 +1036,11 @@ def place_order(
             validated_items.append((db_item.id, qty, price))
 
 
-        # Delivery fee is Rs. 0 (Free Delivery)
-        delivery_fee = 0.0
+        # MaitreD delivery fee is Rs. 60 for delivery orders
+        if is_delivery:
+            delivery_fee = float(payload.delivery_fee) if payload.delivery_fee is not None else 60.0
+        else:
+            delivery_fee = 0.0
 
         packaging_fee = float(payload.packaging_fee) if payload.packaging_fee else 0.0
         tip_amount = float(payload.tip_amount) if payload.tip_amount else 0.0
@@ -1169,6 +1174,7 @@ def place_order(
             db.flush()
             db.refresh(new_order)
         except Exception as _insert_err:
+            # pyrefly: ignore [missing-import]
             from sqlalchemy.exc import IntegrityError
             if isinstance(_insert_err, IntegrityError) and keys_to_check:
                 db.rollback()
@@ -2048,7 +2054,7 @@ def recalculate_order_financials(order: Order, db: Session) -> Decimal:
     else:
         new_discount = Decimal('0.00')
 
-    delivery_fee = Decimal('0.00') if (getattr(order, "order_type", "") or "").upper() == "DELIVERY" else _to_decimal(order.delivery_fee)
+    delivery_fee = _to_decimal(order.delivery_fee) if order.delivery_fee is not None else (Decimal('60.00') if (getattr(order, "order_type", "") or "").upper() == "DELIVERY" else Decimal('0.00'))
     packaging_fee = _to_decimal(order.packaging_fee)
     tip_amount = _to_decimal(order.tip_amount)
 

@@ -10,4 +10,8 @@ cloudflared*
 dataudipi.db
 *.db
 inspect_schema.py
+audit_schema.py
+add_order_source_col.py
+check_pg_items.py
+test_master_p0_suite.py
 extracted_bills*/
