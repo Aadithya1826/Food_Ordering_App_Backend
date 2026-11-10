@@ -444,29 +444,58 @@ async def mobile_agent_tool(
             data_type = args.get("data_type", "packages")
 
             if data_type == "packages":
-                # Fetch available catering packages from the DB
+                # Fetch available catering packages from CateringOrderMenu
                 try:
-                    from ..models.catering import CateringPackage
-                    pkgs = db.query(CateringPackage).filter(
-                        CateringPackage.is_active == True
+                    from ..models.menu import CateringOrderMenu
+                    query = db.query(
+                        CateringOrderMenu.name,
+                        CateringOrderMenu.code,
+                        CateringOrderMenu.price,
+                        CateringOrderMenu.minimum_order_quantity,
+                        CateringOrderMenu.is_available
+                    ).filter(CateringOrderMenu.is_available == True)
+
+                    if request.restaurant_id is not None:
+                        query = query.filter((CateringOrderMenu.restaurant_id == request.restaurant_id) | (CateringOrderMenu.restaurant_id == None))
+
+                    results = query.group_by(
+                        CateringOrderMenu.name,
+                        CateringOrderMenu.code,
+                        CateringOrderMenu.price,
+                        CateringOrderMenu.minimum_order_quantity,
+                        CateringOrderMenu.is_available
                     ).all()
+
+                    packages_data = []
+                    for row in results:
+                        items = db.query(CateringOrderMenu.item_name).filter(
+                            CateringOrderMenu.code == row.code
+                        ).order_by(CateringOrderMenu.display_order).all()
+                        item_names = [i.item_name for i in items if i.item_name]
+                        unique_items = list(dict.fromkeys(item_names))
+
+                        summary = ", ".join(unique_items[:5])
+                        if len(unique_items) > 5:
+                            summary += f" & {len(unique_items) - 5} more"
+
+                        packages_data.append({
+                            "name": row.name,
+                            "code": row.code,
+                            "price_per_person": float(row.price),
+                            "minimum_order_quantity": row.minimum_order_quantity or 50,
+                            "min_pax": row.minimum_order_quantity or 50,
+                            "items_summary": summary,
+                            "items": unique_items
+                        })
+
                     return {
                         "success": True,
-                        "packages": [
-                            {
-                                "id": p.id,
-                                "name": p.name,
-                                "description": getattr(p, "description", None),
-                                "price_per_person": float(getattr(p, "price_per_person", 0)),
-                                "min_pax": getattr(p, "min_pax", None),
-                                "max_pax": getattr(p, "max_pax", None),
-                            }
-                            for p in pkgs
-                        ],
+                        "packages": packages_data,
+                        "count": len(packages_data)
                     }
                 except Exception as e:
                     logger.warning(f"Could not fetch catering packages: {e}")
-                    return {"success": False, "error": "Catering packages unavailable."}
+                    return {"success": False, "error": f"Catering packages unavailable: {str(e)}"}
 
             elif data_type == "customer_orders":
                 customer = _resolve_customer(db, request.customer_id, request.phone)
