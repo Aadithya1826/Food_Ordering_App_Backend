@@ -132,9 +132,9 @@ def get_live_orders(
         placed_by_name = user_map.get(o.user_id) if o.user_id else None
         placed_by_user_id = o.user_id
 
-        # Ensure bill_no is always populated for KOT verification, preserving Dine-In session shared bill
+        # Ensure bill_no is always populated for KOT verification, preserving Dine-In session shared bill for mobile
         if not o.bill_no:
-            if o.dine_in_session_id:
+            if o.dine_in_session_id and getattr(o, "order_source", None) != "CASHIER_POS":
                 sibling_b = db.query(Order.bill_no).filter(
                     Order.dine_in_session_id == o.dine_in_session_id,
                     Order.bill_no.isnot(None)
@@ -553,56 +553,36 @@ def create_pos_order(
         last_order = db.query(Order).filter(Order.restaurant_id == res_id).order_by(Order.branch_order_id.desc().nullslast()).first()
         next_branch_order_id = (last_order.branch_order_id + 1) if last_order and last_order.branch_order_id else 1
 
-        # Check if table has an active Dine-In session to link POS orders to the shared session
+        # Cashier POS orders are strictly independent counter transactions.
+        # Dine-In table sessions and bill aggregation apply ONLY to the Customer Mobile App.
+        # Cashier POS orders must NEVER attach to DineInSession or aggregate/reuse sibling bills.
         pos_order_type = payload.order_type.upper() if payload.order_type else "DINE_IN"
         dine_in_sess_id = None
-        if pos_order_type == "DINE_IN" and table_id:
-            from ..models.dine_in_session import DineInSession
-            active_sess = db.query(DineInSession).filter(
-                DineInSession.restaurant_id == res_id,
-                DineInSession.table_id == table_id,
-                DineInSession.status == "ACTIVE"
-            ).first()
-            if active_sess:
-                dine_in_sess_id = active_sess.id
-                active_sess.total_amount = float(active_sess.total_amount or 0.0) + float(payload.total_amount or 0.0)
-                active_sess.updated_at = datetime.utcnow()
 
         cust_name_clean = payload.customer_name.strip() if payload.customer_name and payload.customer_name.strip() else None
         cust_phone_clean = payload.customer_phone.strip() if payload.customer_phone and payload.customer_phone.strip() else None
 
         assigned_bill_no = payload.bill_no
         if assigned_bill_no:
-            # Check if this bill_no is already taken by any order not in this session
-            conflict_q = db.query(Order.id).filter(
+            # Check if this bill_no is already taken by any existing order in this restaurant
+            existing_bill = db.query(Order.id).filter(
                 Order.bill_no == assigned_bill_no,
                 Order.restaurant_id == res_id
-            )
-            if dine_in_sess_id:
-                conflict_q = conflict_q.filter(or_(Order.dine_in_session_id != dine_in_sess_id, Order.dine_in_session_id.is_(None)))
-            if conflict_q.first():
+            ).first()
+            if existing_bill:
                 assigned_bill_no = None
 
         if not assigned_bill_no:
-            if dine_in_sess_id:
-                sibling_bill = db.query(Order.bill_no).filter(
-                    Order.dine_in_session_id == dine_in_sess_id,
-                    Order.status != "CANCELLED",
-                    Order.bill_no.isnot(None)
-                ).first()
-                if sibling_bill and sibling_bill[0]:
-                    assigned_bill_no = sibling_bill[0]
-            if not assigned_bill_no:
-                # pyrefly: ignore [missing-import]
-                from sqlalchemy import func
-                db.query(Restaurant.id).filter(Restaurant.id == res_id).with_for_update().first()
-                max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
-                assigned_bill_no = (max_bill_no or 0) + 1
+            # pyrefly: ignore [missing-import]
+            from sqlalchemy import func
+            db.query(Restaurant.id).filter(Restaurant.id == res_id).with_for_update().first()
+            max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
+            assigned_bill_no = (max_bill_no or 0) + 1
 
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
-            dine_in_session_id=dine_in_sess_id,
+            dine_in_session_id=None,
             order_source="CASHIER_POS",
             user_id=user.id,
             total_amount=payload.total_amount,
