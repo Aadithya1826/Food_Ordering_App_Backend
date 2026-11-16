@@ -41,7 +41,7 @@ cp .env.example .env
 Then set your values:
 
 ```bash
-DATABASE_URL=postgresql://food_admin:foodadmin%40123@banking-db.cnkegcm24ikf.ap-south-2.rds.amazonaws.com:5432/food_ordering_db
+DATABASE_URL=postgresql://user:password@localhost:5432/food_ordering_db
 SECRET_KEY=replace-with-a-secure-secret
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 GEMINI_MODEL=gemini-1.5-pro

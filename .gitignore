@@ -1,17 +1,57 @@
+# Environment and credentials
 .env
 .env.*
 !.env.example
-node_modules/
+secrets/
+credentials/
+*.pem
+*.key
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-scratch/
-cloudflared*
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
 dataudipi.db
 *.db
+
+# Static generated files
+static/invoices/
+static/sample_invoice.pdf
+extracted_bills*/
+
+# Scratch and test utility scripts
+scratch/
+scan_secrets.py
+test_media_upload.py
+cloudflared*
 inspect_schema.py
 audit_schema.py
 add_order_source_col.py
 check_pg_items.py
 test_master_p0_suite.py
-extracted_bills*/

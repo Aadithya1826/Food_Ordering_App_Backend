@@ -552,6 +552,8 @@ class CustomerOrderPayload(BaseModel):
     table_number: Optional[str] = "takeaway"   # null → treated as takeaway
     order_type: Optional[str] = "Dine In"
     payment_method: str = "UPI"
+    is_ac: Optional[bool] = False
+    order_source: Optional[str] = None
     phone: str = ""
     customer_phone: Optional[str] = None
 
@@ -688,10 +690,37 @@ def place_order(
         from ..models.customer import CustomerAddress
         from ..models.menu import MenuItem
         
+        # Authenticate caller to identify staff/waiter vs customer
+        caller = resolve_order_caller(request, db)
+        staff_user_id = None
+        header_src = (request.headers.get("X-Order-Source") if request else None) or ""
+        payload_src = getattr(payload, "order_source", None) or ""
+
+        if caller and caller.get("type") == "STAFF":
+            staff_user = caller["user"]
+            staff_user_id = staff_user.id
+            if staff_user.role == "WAITER":
+                if staff_user.restaurant_id is None:
+                    raise HTTPException(status_code=403, detail="Waiter must have a restaurant assigned")
+                # Bind strictly to authenticated waiter's assigned restaurant (never trust client)
+                restaurant_id = staff_user.restaurant_id
+                resolved_order_source = "CASHIER_MOBILE"
+            elif staff_user.role in ["HOTEL_ADMIN", "CASHIER", "MANAGER"]:
+                if staff_user.restaurant_id is not None:
+                    restaurant_id = staff_user.restaurant_id
+                resolved_order_source = "CASHIER_MOBILE" if ("CASHIER_MOBILE" in (header_src.upper(), str(payload_src).upper())) else "PC_CASHIER"
+            else:
+                # SUPER_ADMIN
+                resolved_order_source = "CASHIER_MOBILE" if ("CASHIER_MOBILE" in (header_src.upper(), str(payload_src).upper())) else "PC_CASHIER"
+        else:
+            # Customer or guest caller
+            resolved_order_source = "CUSTOMER_MOBILE"
+            staff_user_id = None
+
         restaurant = db.query(Restaurant).filter(Restaurant.id == restaurant_id).first()
         if not restaurant:
-            # If restaurant not found, check if items in cart belong to a valid restaurant
-            if payload.cart and len(payload.cart) > 0:
+            # If restaurant not found and not staff, check if items in cart belong to a valid restaurant
+            if not staff_user_id and payload.cart and len(payload.cart) > 0:
                 first_item = db.query(MenuItem).filter(MenuItem.id == payload.cart[0].id).first()
                 if first_item:
                     restaurant = db.query(Restaurant).filter(Restaurant.id == first_item.restaurant_id).first()
@@ -800,10 +829,7 @@ def place_order(
                 )
 
         resolved_phone = (payload.phone or payload.customer_phone or "").strip()
-        caller = resolve_order_caller(request, db)
-        resolved_user_id = None
-        if caller and caller.get("type") == "CUSTOMER":
-            resolved_user_id = caller["customer"].id
+        if caller and caller.get("type") == "CUSTOMER" and caller.get("customer"):
             if not resolved_phone and caller["customer"].phone:
                 resolved_phone = caller["customer"].phone.strip()
 
@@ -1143,18 +1169,32 @@ def place_order(
         )
         business_cust_time = parse_business_timestamp(raw_cust_ts)
 
+        cust_order_is_ac = False
+        if getattr(payload, "is_ac", False) is True:
+            cust_order_is_ac = True
+        elif payload.order_type and any(ac_term in str(payload.order_type).upper() for ac_term in ["AC", "A/C"]):
+            cust_order_is_ac = True
+        elif table and (str(table.table_number).upper().startswith("AC") or "A/C" in str(table.table_number).upper()):
+            cust_order_is_ac = True
+
+        # Calculate continuous branch_order_id
+        last_bo = db.query(Order.branch_order_id).filter(Order.restaurant_id == restaurant_id).order_by(Order.branch_order_id.desc().nullslast()).first()
+        next_branch_order_id = ((last_bo[0] if last_bo and last_bo[0] else 0) + 1)
+
         new_order = Order(
             restaurant_id=restaurant_id,
             table_id=table_id,
-            user_id=resolved_user_id,
-            dine_in_session_id=session_obj.id if session_obj else None,
+            user_id=staff_user_id,
+            dine_in_session_id=(session_obj.id if session_obj else None) if not staff_user_id else None,
             bill_no=session_bill_no,
-            order_source="CUSTOMER_APP",
+            branch_order_id=next_branch_order_id,
+            order_source=resolved_order_source,
             total_amount=calculated_total,
             status=status,
             payment_status=payment_status,
             payment_method=clean_payment_method,
             order_type="DELIVERY" if is_delivery else (payload.order_type if payload.order_type else "DINE_IN"),
+            is_ac=cust_order_is_ac,
             delivery_address_id=valid_delivery_address_id,
             delivery_address_snapshot=delivery_snapshot,
             delivery_instructions=payload.delivery_instructions,
@@ -1271,6 +1311,7 @@ def place_order(
             "dbOrderId": new_order.id,
             "order_id": new_order.id,
             "id": new_order.id,
+            "branch_order_id": new_order.branch_order_id,
             "bill_no": new_order.bill_no,
             "billNo": new_order.bill_no,
             "sessionId": session_obj.id if session_obj else None,
@@ -1291,6 +1332,7 @@ def place_order(
         raise HTTPException(status_code=500, detail="An error occurred while placing your order. Please try again.")
 
 
+@router.post("/api/v1/orders/{order_id}/settle-payment")
 @router.post("/api/orders/{order_id}/settle-payment")
 def settle_order_payment(order_id: str, payload: SettlePaymentPayload, db: Session = Depends(get_db)):
     try:
@@ -1910,7 +1952,7 @@ def resolve_order_caller(request: Request, db: Session) -> Optional[dict]:
     account_type = payload.get("account_type")
 
     # 1. Staff check
-    if role in ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"] or account_type in ["STAFF", "ADMIN"]:
+    if role in ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER", "WAITER", "MANAGER"] or account_type in ["STAFF", "ADMIN", "WAITER"]:
         from ..middleware import get_user_from_token
         try:
             user = get_user_from_token(token, db)
@@ -1962,7 +2004,7 @@ def authorize_order_access_for_cancellation(
     if caller and caller.get("type") == "CUSTOMER":
         cust = caller["customer"]
         # Cashier POS isolation
-        if getattr(order, "order_source", None) == "CASHIER_POS":
+        if getattr(order, "order_source", None) in ["CASHIER_POS", "PC_CASHIER", "CASHIER_MOBILE"]:
             raise HTTPException(
                 status_code=403,
                 detail="Cancellation unavailable for orders placed directly at the cashier counter."
@@ -1992,7 +2034,7 @@ def authorize_order_access_for_cancellation(
     if session_uid and order.dine_in_session_id:
         sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
         if sess and sess.session_uid == session_uid and sess.restaurant_id == order.restaurant_id:
-            if getattr(order, "order_source", None) == "CASHIER_POS":
+            if getattr(order, "order_source", None) in ["CASHIER_POS", "PC_CASHIER", "CASHIER_MOBILE"]:
                 raise HTTPException(
                     status_code=403,
                     detail="Cancellation unavailable for orders placed directly at the cashier counter."
@@ -2535,7 +2577,7 @@ def get_order_by_id(
                 raise HTTPException(status_code=403, detail="Unauthorized: Access to this order is denied")
     elif not caller:
         # Cashier POS orders must not leak to unauthenticated public callers
-        if getattr(order, "order_source", None) == "CASHIER_POS":
+        if getattr(order, "order_source", None) in ["CASHIER_POS", "PC_CASHIER", "CASHIER_MOBILE"]:
             if not session_uid or not order.dine_in_session_id:
                 raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
             sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
@@ -2675,7 +2717,7 @@ def get_public_order(
                 raise HTTPException(status_code=403, detail="Unauthorized: Access to this order is denied")
     elif not caller:
         # Counter POS orders must never leak to unauthenticated public callers
-        if getattr(order, "order_source", None) == "CASHIER_POS":
+        if getattr(order, "order_source", None) in ["CASHIER_POS", "PC_CASHIER", "CASHIER_MOBILE"]:
             if not session_uid or not order.dine_in_session_id:
                 raise HTTPException(status_code=403, detail="Access to counter POS orders requires authentication")
             sess = db.query(DineInSession).filter(DineInSession.id == order.dine_in_session_id).first()
@@ -2805,7 +2847,7 @@ def get_customer_orders_by_phone(
         db.query(Order)
         .options(joinedload(Order.items).joinedload(OrderItem.menu_item))
         .filter(Order.restaurant_id == restaurant_id)
-        .filter(or_(Order.order_source == "CUSTOMER_APP", Order.order_source.is_(None)))
+        .filter(or_(Order.order_source.in_(["CUSTOMER_MOBILE", "CUSTOMER_APP"]), Order.order_source.is_(None)))
         .filter(Order.customer_phone.isnot(None))
         .filter(or_(*filters))
         .order_by(Order.created_at.desc())

@@ -80,22 +80,19 @@ def resolve_restaurant_id(user, restaurant_id: int | None = None) -> int | None:
     Resolve the effective restaurant_id for the current user.
 
     - SUPER_ADMIN: May pass an explicit restaurant_id or request all restaurants if None.
-    - HOTEL_ADMIN: Always returns their assigned restaurant_id.
+    - HOTEL_ADMIN / CASHIER / WAITER: Always bound to their trusted backend assigned restaurant_id.
+      Untrusted client-supplied restaurant_ids cannot override their assignment.
     """
     if user.role == "SUPER_ADMIN":
         return restaurant_id
 
-    if user.role in ["HOTEL_ADMIN", "CASHIER", "WAITER"]:
+    if user.role in ["HOTEL_ADMIN", "CASHIER", "WAITER", "MANAGER"]:
         if user.restaurant_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"{user.role} must have a restaurant assigned"
             )
-        if restaurant_id is not None and restaurant_id != user.restaurant_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"{user.role} can only access restaurant {user.restaurant_id}"
-            )
+        # Always return trusted backend assignment for branch-scoped staff
         return user.restaurant_id
 
     raise HTTPException(

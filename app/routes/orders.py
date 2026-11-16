@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, func
 # pyrefly: ignore [missing-import]
 from sqlalchemy.exc import IntegrityError
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Any, Union
 # pyrefly: ignore [missing-import]
@@ -134,7 +135,7 @@ def get_live_orders(
 
         # Ensure bill_no is always populated for KOT verification, preserving Dine-In session shared bill for mobile
         if not o.bill_no:
-            if o.dine_in_session_id and getattr(o, "order_source", None) != "CASHIER_POS":
+            if o.dine_in_session_id and getattr(o, "order_source", None) not in ["CASHIER_POS", "PC_CASHIER", "CASHIER_MOBILE"]:
                 sibling_b = db.query(Order.bill_no).filter(
                     Order.dine_in_session_id == o.dine_in_session_id,
                     Order.bill_no.isnot(None)
@@ -168,7 +169,7 @@ def get_live_orders(
             "delivery_address": o.delivery_address_snapshot,
             "delivery_status": getattr(o, "delivery_status", None),
             "dine_in_session_id": o.dine_in_session_id,
-            "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
+            "order_source": getattr(o, "order_source", "CUSTOMER_MOBILE") or "CUSTOMER_MOBILE",
             "placed_by_user_id": placed_by_user_id,
             "placed_by_name": placed_by_name,
             "client_order_id": getattr(o, "client_order_id", None),
@@ -263,7 +264,7 @@ def get_all_orders(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER"])
+    require_role(user, ["HOTEL_ADMIN", "SUPER_ADMIN", "CASHIER", "WAITER"])
 
     restaurant_id = resolve_restaurant_id(user, restaurant_id)
     query = db.query(Order).options(
@@ -354,7 +355,7 @@ def get_all_orders(
             "delivery_address": o.delivery_address_snapshot,
             "delivery_status": getattr(o, "delivery_status", None),
             "dine_in_session_id": o.dine_in_session_id,
-            "order_source": getattr(o, "order_source", "CUSTOMER_APP") or "CUSTOMER_APP",
+            "order_source": getattr(o, "order_source", "CUSTOMER_MOBILE") or "CUSTOMER_MOBILE",
             "client_order_id": getattr(o, "client_order_id", None),
             "idempotency_key": getattr(o, "idempotency_key", None),
         })
@@ -371,6 +372,7 @@ class PosOrderPayload(BaseModel):
     table_number: str = "takeaway"
     order_type: Optional[str] = "DINE_IN"
     payment_method: str = "Cash"
+    order_source: Optional[str] = None
     cart: List[PosCartItem] = []
     total_amount: float = 0
     bill_no: Optional[int] = None
@@ -378,6 +380,7 @@ class PosOrderPayload(BaseModel):
     original_timestamp: Optional[Any] = None
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
+    is_ac: Optional[bool] = False
     client_order_id: Optional[str] = None
     idempotency_key: Optional[str] = None
 
@@ -579,17 +582,35 @@ def create_pos_order(
             max_bill_no = db.query(func.max(Order.bill_no)).filter(Order.restaurant_id == res_id).scalar() or 0
             assigned_bill_no = (max_bill_no or 0) + 1
 
+        order_is_ac = False
+        if getattr(payload, "is_ac", False) is True:
+            order_is_ac = True
+        elif payload.order_type and any(ac_term in payload.order_type.upper() for ac_term in ["AC", "A/C"]):
+            order_is_ac = True
+        elif payload.table_number and (payload.table_number.strip().upper().startswith("AC") or "A/C" in payload.table_number.strip().upper()):
+            order_is_ac = True
+
+        # Resolve order source/channel classification:
+        # PC_CASHIER for desktop POS, CASHIER_MOBILE for mobile cashier/waiter app
+        header_src = request.headers.get("X-Order-Source") if request else None
+        candidate_src = (header_src or payload.order_source or "").strip().upper()
+        if user.role == "WAITER" or candidate_src in ["CASHIER_MOBILE", "WAITER_MOBILE"]:
+            order_source_val = "CASHIER_MOBILE"
+        else:
+            order_source_val = "PC_CASHIER"
+
         new_order = Order(
             restaurant_id=res_id,
             table_id=table_id,
             dine_in_session_id=None,
-            order_source="CASHIER_POS",
+            order_source=order_source_val,
             user_id=user.id,
             total_amount=payload.total_amount,
             status=status,
             payment_status=payment_status,
             payment_method=payload.payment_method,
             order_type=pos_order_type,
+            is_ac=order_is_ac,
             bill_no=assigned_bill_no,
             branch_order_id=next_branch_order_id,
             customer_name=cust_name_clean,
@@ -671,12 +692,302 @@ def create_pos_order(
             "branch_order_id": new_order.branch_order_id,
             "bill_no": new_order.bill_no,
             "status": new_order.status,
+            "is_ac": getattr(new_order, "is_ac", False),
             "total_amount": new_order.total_amount,
             "created_at": new_order.created_at.isoformat() if new_order.created_at else None,
             "idempotency_key": new_order.idempotency_key,
             "client_order_id": new_order.client_order_id,
             "message": "Order created successfully"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
+
+
+class WhatsAppSendBillPayload(BaseModel):
+    phone: Optional[str] = None
+    token: Optional[str] = None
+    phone_number_id: Optional[str] = None
+
+
+@router.post("/api/v1/orders/{order_id}/send-whatsapp-bill")
+def send_order_whatsapp_bill(
+    order_id: int,
+    payload: Optional[WhatsAppSendBillPayload] = None,
+    db: Session = Depends(get_db)
+):
+    from ..services.whatsapp import format_whatsapp_bill_text, send_whatsapp_invoice_bundle
+    order = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    cust_phone = (payload.phone if payload and payload.phone else None) or order.customer_phone
+    if not cust_phone:
+        raise HTTPException(status_code=400, detail="Customer phone number is required to send WhatsApp bill")
+
+    rest = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first() if order.restaurant_id else None
+    rest_name = rest.name if rest else "DATA UDIPI"
+
+    items = []
+    for it in (order.items or []):
+        if (getattr(it, "status", None) or "").upper() != "CANCELLED":
+            items.append({
+                "name": it.menu_item.name if it.menu_item else "Item",
+                "quantity": it.quantity,
+                "price": float(it.price or 0.0),
+            })
+
+    order_data = {
+        "restaurant_name": rest_name,
+        "table_number": str(order.table_id or ""),
+        "customer_phone": cust_phone,
+        "bill_no": order.bill_no or order.id,
+        "order_id": order.id,
+        "total_amount": float(order.total_amount or 0.0),
+        "payment_method": order.payment_method or "Cash",
+        "items": items,
+        "date_str": order.created_at.strftime('%Y-%m-%d %H:%M:%S') if getattr(order, 'created_at', None) else None,
+    }
+
+    token = payload.token if payload else None
+    phone_number_id = payload.phone_number_id if payload else None
+
+    bundle_res = send_whatsapp_invoice_bundle(order_data, phone=cust_phone, token=token, phone_number_id=phone_number_id)
+    return {
+        "success": bundle_res.get("success", False),
+        "bill_text": bundle_res.get("bill_text") or format_whatsapp_bill_text(order_data),
+        "phone": cust_phone,
+        "pdf_url": bundle_res.get("pdf_url"),
+        "template_sent": bundle_res.get("template_sent", False),
+        "document_sent": bundle_res.get("document_sent", False),
+        "result": bundle_res,
+    }
+
+
+@router.get("/api/v1/orders/{order_id}/invoice-pdf")
+def get_order_invoice_pdf(
+    order_id: int,
+    db: Session = Depends(get_db)
+):
+    from fastapi.responses import Response
+    from ..services.invoice_pdf import generate_invoice_pdf
+    order = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    rest = db.query(Restaurant).filter(Restaurant.id == order.restaurant_id).first() if order.restaurant_id else None
+    rest_name = rest.name if rest else "DATA UDIPI"
+
+    items = []
+    for it in (order.items or []):
+        if (getattr(it, "status", None) or "").upper() != "CANCELLED":
+            items.append({
+                "name": it.menu_item.name if it.menu_item else "Item",
+                "quantity": it.quantity,
+                "price": float(it.price or 0.0),
+            })
+
+    order_data = {
+        "restaurant_name": rest_name,
+        "table_number": str(order.table_id or ""),
+        "customer_phone": order.customer_phone or "",
+        "bill_no": order.bill_no or order.id,
+        "order_id": order.id,
+        "total_amount": float(order.total_amount or 0.0),
+        "payment_method": order.payment_method or "Cash",
+        "items": items,
+        "date_str": order.created_at.strftime('%Y-%m-%d %H:%M:%S') if getattr(order, 'created_at', None) else None,
+    }
+
+    pdf_bytes = generate_invoice_pdf(order_data)
+    bill_no = str(order.bill_no or order.id)
+    filename = f"Data_Udipi_Invoice_{bill_no}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
+    )
+
+
+class WhatsAppDirectBundlePayload(BaseModel):
+    phone: Optional[str] = None
+    bill_data: Optional[dict] = None
+    order_id: Optional[Union[int, str]] = None
+
+
+@router.post("/api/v1/whatsapp/send-bill-bundle")
+def send_whatsapp_bill_bundle_direct(
+    payload: WhatsAppDirectBundlePayload,
+    db: Session = Depends(get_db)
+):
+    from ..services.whatsapp import send_whatsapp_invoice_bundle, format_whatsapp_bill_text
+
+    order_data = payload.bill_data or {}
+    cust_phone = payload.phone or order_data.get("customerPhone") or order_data.get("customer_phone")
+
+    # If order_id is provided and order exists in db, augment order_data with DB info
+    if payload.order_id and str(payload.order_id).isdigit():
+        db_order = db.query(Order).options(
+            joinedload(Order.items).joinedload(OrderItem.menu_item)
+        ).filter(Order.id == int(payload.order_id)).first()
+        if db_order:
+            if not cust_phone:
+                cust_phone = db_order.customer_phone
+            if not order_data.get("items"):
+                items = []
+                for it in (db_order.items or []):
+                    if (getattr(it, "status", None) or "").upper() != "CANCELLED":
+                        items.append({
+                            "name": it.menu_item.name if it.menu_item else "Item",
+                            "quantity": it.quantity,
+                            "price": float(it.price or 0.0),
+                        })
+                order_data["items"] = items
+            if not order_data.get("total_amount"):
+                order_data["total_amount"] = float(db_order.total_amount or 0.0)
+            if not order_data.get("bill_no"):
+                order_data["bill_no"] = db_order.bill_no or db_order.id
+            if not order_data.get("table_number"):
+                order_data["table_number"] = str(db_order.table_id or "")
+
+    if not cust_phone:
+        raise HTTPException(status_code=400, detail="Customer phone number is required")
+
+    order_data["customer_phone"] = cust_phone
+    if not order_data.get("restaurant_name"):
+        order_data["restaurant_name"] = "Data Udipi"
+
+    res = send_whatsapp_invoice_bundle(order_data, phone=cust_phone)
+    return {
+        "success": res.get("success", False),
+        "phone": cust_phone,
+        "template_name": res.get("template_name"),
+        "message_id": res.get("message_id"),
+        "pdf_url": res.get("pdf_url"),
+        "filename": res.get("filename"),
+        "error": res.get("error"),
+        "bill_text": res.get("bill_text") or format_whatsapp_bill_text(order_data),
+    }
+
+
+class WhatsAppTestTemplatePayload(BaseModel):
+    phone: str
+
+
+@router.post("/api/v1/whatsapp/test-template")
+def test_whatsapp_template_pdf(payload: WhatsAppTestTemplatePayload):
+    from ..services.whatsapp import send_whatsapp_invoice_bundle
+    cust_phone = payload.phone
+    if not cust_phone:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+
+    sample_order = {
+        "restaurant_name": "Data Udipi",
+        "table_number": "TB 1",
+        "customer_name": "Valued Guest",
+        "customer_phone": cust_phone,
+        "bill_no": "DU-TEST-001",
+        "total_amount": 75.0,
+        "subtotal": 75.0,
+        "discount": 0.0,
+        "payment_method": "Cash",
+        "items": [
+            {"name": "Masala Dosa", "quantity": 1, "price": 50.0},
+            {"name": "Filter Coffee", "quantity": 1, "price": 25.0}
+        ]
+    }
+
+    res = send_whatsapp_invoice_bundle(sample_order, phone=cust_phone)
+    return {
+        "success": res.get("success", False),
+        "phone": cust_phone,
+        "template_name": res.get("template_name"),
+        "message_id": res.get("message_id"),
+        "pdf_url": res.get("pdf_url"),
+        "filename": res.get("filename"),
+        "error": res.get("error"),
+    }
+
+
+# ============================================================================
+# Meta WhatsApp Delivery Webhook (Sent, Delivered, Read, Failed Status Tracking)
+# ============================================================================
+WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "data_udipi_whatsapp_token")
+
+# In-memory status store for recent message deliveries
+delivery_status_store = {}
+
+
+@router.get("/api/v1/whatsapp/webhook")
+def whatsapp_webhook_verification(request: Request):
+    """
+    Handles Meta Webhook handshake verification.
+    """
+    params = dict(request.query_params)
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    if mode == "subscribe" and token == WHATSAPP_WEBHOOK_VERIFY_TOKEN:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content=challenge or "")
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+
+@router.post("/api/v1/whatsapp/webhook")
+async def whatsapp_webhook_events(request: Request):
+    """
+    Receives real-time delivery status updates from Meta WhatsApp Cloud API:
+    - sent
+    - delivered
+    - read
+    - failed
+    """
+    try:
+        body = await request.json()
+        entry = body.get("entry", [{}])[0]
+        changes = entry.get("changes", [{}])[0]
+        value = changes.get("value", {})
+        statuses = value.get("statuses", [])
+
+        for s in statuses:
+            msg_id = s.get("id")
+            status = s.get("status") # 'sent', 'delivered', 'read', 'failed'
+            recipient_id = s.get("recipient_id")
+            timestamp = s.get("timestamp")
+            errors = s.get("errors", [])
+
+            if msg_id:
+                delivery_status_store[msg_id] = {
+                    "status": status,
+                    "recipient_id": recipient_id,
+                    "timestamp": timestamp,
+                    "errors": errors,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                logger.info(f"[WhatsApp Webhook] Message {msg_id} -> {status.upper()} (Recipient: {recipient_id})")
+
+        return {"status": "EVENT_RECEIVED"}
+    except Exception as e:
+        logger.error(f"[WhatsApp Webhook] Error processing event: {str(e)}")
+        return {"status": "ERROR", "detail": str(e)}
+
+
+@router.get("/api/v1/whatsapp/status/{message_id}")
+def get_whatsapp_delivery_status(message_id: str):
+    """
+    Query real-time delivery status for a WhatsApp message ID.
+    """
+    info = delivery_status_store.get(message_id)
+    if not info:
+        return {"message_id": message_id, "status": "sent"}
+    return {"message_id": message_id, **info}

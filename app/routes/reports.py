@@ -6,6 +6,7 @@ import json
 from ..db import SessionLocal
 from ..models.order import Order, OrderItem
 from ..models.menu import MenuItem
+from ..models.table import Table
 from ..models.restaurant import Restaurant
 from ..models.customer import Customer
 from ..models.user import User
@@ -20,6 +21,55 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def is_order_ac(order: Order, table_map: dict | None = None) -> bool:
+    """
+    Determines whether an order is an AC bill.
+    True if:
+      - order.is_ac is True
+      - order.order_type explicitly contains 'AC' or 'A/C' (e.g. 'AC', 'AC_DINE_IN', 'DINE_IN_AC', 'AC_BILL')
+      - The associated table number starts with 'AC' or contains 'A/C'
+    """
+    if getattr(order, "is_ac", False) is True:
+        return True
+
+    otype = (getattr(order, "order_type", None) or "").strip().upper().replace("-", "_").replace(" ", "_")
+    parts = otype.split("_")
+    if "AC" in parts or "A/C" in otype or otype in ["AC", "AC_DINE_IN", "DINE_IN_AC", "AC_BILL"]:
+        return True
+
+    t_id = getattr(order, "table_id", None)
+    t_num = ""
+    if table_map and t_id in table_map:
+        t_num = str(table_map[t_id] or "").strip().upper()
+    elif getattr(order, "table", None) and hasattr(order.table, "table_number"):
+        t_num = str(order.table.table_number or "").strip().upper()
+    elif t_id and not str(t_id).isdigit():
+        t_num = str(t_id).strip().upper()
+
+    if t_num.startswith("AC") or "A/C" in t_num:
+        return True
+
+    return False
+
+
+def is_order_cashier(order: Order) -> bool:
+    """
+    Classifies whether an order belongs to Cashier Sales vs Mobile Sales.
+    - Cashier Sales: PC_CASHIER, CASHIER_MOBILE, legacy CASHIER_POS, or any staff user_id
+      (unless explicitly CUSTOMER_MOBILE without staff).
+    - Mobile Sales: ONLY orders placed directly by customers through customer apps
+      (CUSTOMER_MOBILE, or legacy CUSTOMER_APP with no staff user_id).
+    """
+    src = getattr(order, "order_source", None)
+    if src in ("PC_CASHIER", "CASHIER_MOBILE", "CASHIER_POS"):
+        return True
+    if src == "CUSTOMER_MOBILE":
+        return False
+    # If placed or handled by a staff user (cashier/waiter)
+    if getattr(order, "user_id", None) is not None:
+        return True
+    return False
 
 @router.get("/api/v1/reports")
 def get_reports(
@@ -230,6 +280,7 @@ def get_hourly_report(
     start_date: str | None = None,
     end_date: str | None = None,
     restaurant_id: int | None = None,
+    ac_only: bool = False,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -288,6 +339,25 @@ def get_hourly_report(
         q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
+
+    # Pre-fetch table numbers for AC detection
+    table_map = {t.id: t.table_number for t in db.query(Table.id, Table.table_number).all()}
+
+    ac_sales = 0.0
+    non_ac_sales = 0.0
+    ac_orders_count = 0
+    non_ac_orders_count = 0
+    for o in orders:
+        amt = float(o.total_amount or 0.0)
+        if is_order_ac(o, table_map):
+            ac_sales += amt
+            ac_orders_count += 1
+        else:
+            non_ac_sales += amt
+            non_ac_orders_count += 1
+
+    if ac_only:
+        orders = [o for o in orders if is_order_ac(o, table_map)]
     
     timeline = []
     total_sales = 0.0
@@ -336,6 +406,11 @@ def get_hourly_report(
         "ending_bill": ending_bill,
         "timeline": timeline,
         "total_sales": total_sales,
+        "ac_sales": round(ac_sales, 2),
+        "non_ac_sales": round(non_ac_sales, 2),
+        "ac_orders_count": ac_orders_count,
+        "non_ac_orders_count": non_ac_orders_count,
+        "is_ac_report": ac_only,
         "restaurant": {
             "name": restaurant.name if restaurant and restaurant.name else "DATAUDIPI HOTEL",
             "address": restaurant.address if restaurant and restaurant.address else "MUGALIVAKKAM, CHENNAI",
@@ -350,6 +425,7 @@ def get_item_wise_report(
     start_date: str | None = None,
     end_date: str | None = None,
     restaurant_id: int | None = None,
+    ac_only: bool = False,
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -397,7 +473,9 @@ def get_item_wise_report(
     )
     
     # Get all orders for the day
-    q = db.query(Order).filter(
+    q = db.query(Order).options(
+        joinedload(Order.items).joinedload(OrderItem.menu_item)
+    ).filter(
         Order.created_at >= utc_start,
         Order.created_at < utc_end,
         paid_condition
@@ -409,6 +487,21 @@ def get_item_wise_report(
         q = q.filter(Order.user_id == user.id)
         
     orders = q.order_by(Order.id.asc()).all()
+
+    # Pre-fetch table numbers for AC detection
+    table_map = {t.id: t.table_number for t in db.query(Table.id, Table.table_number).all()}
+
+    ac_sales = 0.0
+    non_ac_sales = 0.0
+    for o in orders:
+        amt = float(o.total_amount or 0.0)
+        if is_order_ac(o, table_map):
+            ac_sales += amt
+        else:
+            non_ac_sales += amt
+
+    if ac_only:
+        orders = [o for o in orders if is_order_ac(o, table_map)]
     
     total_sales = 0.0
     item_aggregates = {}
@@ -463,6 +556,9 @@ def get_item_wise_report(
         "ending_bill": ending_bill,
         "items": items_list,
         "total_sales": total_sales,
+        "ac_sales": round(ac_sales, 2),
+        "non_ac_sales": round(non_ac_sales, 2),
+        "is_ac_report": ac_only,
         "cgst": 0.00,
         "sgst": 0.00,
         "actual_sales": total_sales,
@@ -543,15 +639,24 @@ def _build_sales_report(
 
     # ── Source filtering ─────────────────────────────────────────────────────
     cashier_cond = or_(
-        Order.order_source == "CASHIER_POS",
-        Order.user_id.isnot(None)
+        Order.order_source.in_(["PC_CASHIER", "CASHIER_MOBILE", "CASHIER_POS"]),
+        and_(
+            Order.user_id.isnot(None),
+            or_(
+                Order.order_source.is_(None),
+                Order.order_source.notin_(["CUSTOMER_MOBILE", "CUSTOMER_APP"])
+            )
+        )
     )
     mobile_cond = and_(
-        Order.user_id.is_(None),
         or_(
-            Order.order_source == "CUSTOMER_APP",
-            Order.order_source.is_(None)
-        )
+            Order.order_source.in_(["CUSTOMER_MOBILE", "CUSTOMER_APP"]),
+            and_(
+                Order.user_id.is_(None),
+                Order.order_source.is_(None)
+            )
+        ),
+        Order.order_source.notin_(["PC_CASHIER", "CASHIER_MOBILE", "CASHIER_POS"])
     )
 
     q = db.query(Order).options(
@@ -567,11 +672,13 @@ def _build_sales_report(
         q = q.filter(cashier_cond)
 
     if restaurant_id:
-        q_hotel = q.filter(Order.restaurant_id == restaurant_id)
-        if q_hotel.count() > 0:
-            q = q_hotel
+        q = q.filter(Order.restaurant_id == restaurant_id)
 
+    table_map = {t.id: t.table_number for t in db.query(Table.id, Table.table_number).all()}
     all_orders = q.order_by(Order.created_at.asc()).all()
+
+    if source_filter == "AC":
+        all_orders = [o for o in all_orders if is_order_ac(o, table_map)]
 
     # ── Filter fulfilled/paid orders for sales aggregation ──────────────────
     paid_orders = [
@@ -606,6 +713,10 @@ def _build_sales_report(
     total_sales = 0.0
     cashier_sales = 0.0
     mobile_sales = 0.0
+    ac_sales = 0.0
+    non_ac_sales = 0.0
+    ac_orders_count = 0
+    non_ac_orders_count = 0
     cashier_orders_count = 0
     mobile_orders_count = 0
 
@@ -617,13 +728,24 @@ def _build_sales_report(
         "DINE_IN": {"count": 0, "sales": 0.0},
         "TAKEAWAY": {"count": 0, "sales": 0.0},
         "DELIVERY": {"count": 0, "sales": 0.0},
+        "AC_BILL": {"count": 0, "sales": 0.0},
     }
 
     for o in paid_orders:
         amount = float(o.total_amount or 0.0)
         total_sales += amount
 
-        is_cashier_order = (getattr(o, "order_source", None) == "CASHIER_POS" or o.user_id is not None)
+        is_ac_order = is_order_ac(o, table_map)
+        if is_ac_order:
+            ac_sales += amount
+            ac_orders_count += 1
+            order_type_breakdown["AC_BILL"]["count"] += 1
+            order_type_breakdown["AC_BILL"]["sales"] += amount
+        else:
+            non_ac_sales += amount
+            non_ac_orders_count += 1
+
+        is_cashier_order = is_order_cashier(o)
         if is_cashier_order:
             cashier_sales += amount
             cashier_orders_count += 1
@@ -673,7 +795,7 @@ def _build_sales_report(
         amount = float(o.total_amount or 0.0)
         local_time = o.created_at + timedelta(hours=5, minutes=30)
 
-        is_cashier_order = (getattr(o, "order_source", None) == "CASHIER_POS" or o.user_id is not None)
+        is_cashier_order = is_order_cashier(o)
         source_key = "CASHIER" if is_cashier_order else "MOBILE"
         source_badge = "(C)" if is_cashier_order else "(M)"
         source_label = "(C) Cashier" if is_cashier_order else "(M) Mobile"
@@ -715,6 +837,7 @@ def _build_sales_report(
             })
             summary_items.append(f"{iname} x{iqty}")
 
+        is_ac_order = is_order_ac(o, table_map)
         orders_list.append({
             "id": o.id,
             "order_id": f"ORD-{str(o.id).zfill(6)}",
@@ -724,6 +847,9 @@ def _build_sales_report(
             "source": source_key,
             "source_badge": source_badge,
             "source_label": source_label,
+            "is_ac": is_ac_order,
+            "ac_badge": "(AC)" if is_ac_order else "",
+            "ac_label": "AC Bill" if is_ac_order else "Non-AC",
             "customer_name": cust_name,
             "customer_phone": raw_phone,
             "order_type": otype,
@@ -776,8 +902,8 @@ def _build_sales_report(
         last = target_boundary_orders[-1]
         first_local = first.created_at + timedelta(hours=5, minutes=30)
         last_local = last.created_at + timedelta(hours=5, minutes=30)
-        first_is_c = (getattr(first, "order_source", None) == "CASHIER_POS" or first.user_id is not None)
-        last_is_c = (getattr(last, "order_source", None) == "CASHIER_POS" or last.user_id is not None)
+        first_is_c = is_order_cashier(first)
+        last_is_c = is_order_cashier(last)
         starting_order = {
             "id": f"ORD-{str(first.id).zfill(6)}",
             "time": first_local.strftime("%I:%M:%S %p"),
@@ -805,9 +931,13 @@ def _build_sales_report(
         "total_sales": round(total_sales, 2),
         "cashier_sales": round(cashier_sales, 2),
         "mobile_sales": round(mobile_sales, 2),
+        "ac_sales": round(ac_sales, 2),
+        "non_ac_sales": round(non_ac_sales, 2),
         "total_orders": total_orders,
         "cashier_orders_count": cashier_orders_count,
         "mobile_orders_count": mobile_orders_count,
+        "ac_orders_count": ac_orders_count,
+        "non_ac_orders_count": non_ac_orders_count,
         "starting_order": starting_order,
         "ending_order": ending_order,
         "items": items_list,
@@ -822,6 +952,23 @@ def _build_sales_report(
             "gstin": restaurant.gst_number if restaurant and restaurant.gst_number else "33ADLPV4810B3ZQ"
         }
     }
+
+
+@router.get("/api/v1/reports/ac-bills")
+@router.get("/api/v1/reports/ac")
+def get_ac_report(
+    date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    restaurant_id: int | None = None,
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    AC Bills Sales Report alone.
+    Returns sales data ONLY for orders/bills placed in AC.
+    """
+    return _build_sales_report(db, user, restaurant_id, date, start_date, end_date, source_filter="AC")
 
 
 @router.get("/api/v1/reports/mobile-app")
