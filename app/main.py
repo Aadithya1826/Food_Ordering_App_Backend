@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Data Udipi Food Ordering API"}
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
