@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import]
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
 # pyrefly: ignore [missing-import]
 from sqlalchemy.orm import relationship
 from ..db import Base
@@ -45,7 +45,8 @@ class Order(Base):
     
     # Dine-In Session linkage (Additive & strictly isolated to Dine-In)
     dine_in_session_id = Column(Integer, ForeignKey("dine_in_sessions.id"), nullable=True, index=True)
-    order_source = Column(String(32), default="CUSTOMER_APP", nullable=True)
+    order_source = Column(String(32), default="CUSTOMER_MOBILE", nullable=True)
+    is_ac = Column(Boolean, default=False, nullable=True, index=True)
 
     # Idempotency & Offline Outage Sync Tracking
     idempotency_key = Column(String(255), unique=True, index=True, nullable=True)

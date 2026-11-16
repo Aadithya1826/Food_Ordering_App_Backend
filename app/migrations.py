@@ -57,6 +57,7 @@ def create_tables():
                 ("gst_amount", "FLOAT"),
                 ("tip_amount", "FLOAT"),
                 ("order_type", "VARCHAR DEFAULT 'DINE_IN'"),
+                ("is_ac", "BOOLEAN DEFAULT FALSE"),
                 ("idempotency_key", "VARCHAR(255)"),
                 ("client_order_id", "VARCHAR(255)")
             ]
