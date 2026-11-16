@@ -45,6 +45,10 @@ static/invoices/
 static/sample_invoice.pdf
 extracted_bills*/
 
+# Node
+node_modules/
+package-lock.json
+
 # Scratch and test utility scripts
 scratch/
 scan_secrets.py
